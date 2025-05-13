@@ -47,7 +47,7 @@ A professional, streamlined trading platform for the HyperLiquid exchange, focus
 
 3. **Run:**
    ```bash
-   python elysium.py
+   python main.py
    ```
 
 ## Basic Command Reference
