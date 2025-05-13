@@ -29,8 +29,8 @@ A professional, streamlined trading platform for the HyperLiquid exchange, focus
 
 1. **Install:**
    ```bash
-   git clone https://github.com/yourusername/mmmm-trading.git
-   cd mmmm-trading
+   git clone https://github.com/AlwaysUbaid/MarketMakingMegaMachine.git
+   cd MarketMakingMegaMachine
    pip install -r requirements.txt
    ```
 
