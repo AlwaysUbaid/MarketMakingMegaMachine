@@ -47,6 +47,11 @@ class UethMarketMaking(TradingStrategy):
             "type": "int",
             "description": "Time in seconds between order refresh"
         },
+        "order_max_age": {
+            "value": 30,  # 30 seconds default
+            "type": "int",
+            "description": "Maximum time in seconds before unfilled orders are cancelled and replaced"
+        },
         "is_perp": {
             "value": False,
             "type": "bool",
@@ -69,6 +74,7 @@ class UethMarketMaking(TradingStrategy):
         self.ask_spread = self._get_param_value("ask_spread")
         self.order_amount = self._get_param_value("order_amount")
         self.refresh_time = self._get_param_value("refresh_time")
+        self.order_max_age = self._get_param_value("order_max_age")
         self.is_perp = self._get_param_value("is_perp")
         self.leverage = self._get_param_value("leverage")
         
@@ -77,6 +83,8 @@ class UethMarketMaking(TradingStrategy):
         self.mid_price = 0
         self.active_buy_order_id = None
         self.active_sell_order_id = None
+        self.active_buy_order_time = None  
+        self.active_sell_order_time = None  
         self.status_message = "Initialized"
         self.status_lock = threading.Lock()
         self.prev_mid_price = None
@@ -249,6 +257,7 @@ class UethMarketMaking(TradingStrategy):
             success, order_id, error_msg = self._check_order_result(result, "Buy")
             if success:
                 self.active_buy_order_id = order_id
+                self.active_buy_order_time = time.time()
                 self.logger.info(f"Successfully placed buy order ID {order_id} at {bid_price}")
                 return True, order_id
             else:
@@ -308,6 +317,7 @@ class UethMarketMaking(TradingStrategy):
             success, order_id, error_msg = self._check_order_result(result, "Sell")
             if success:
                 self.active_sell_order_id = order_id
+                self.active_sell_order_time = time.time()
                 self.logger.info(f"Successfully placed sell order ID {order_id} at {ask_price}")
                 return True, order_id
             else:
@@ -340,6 +350,7 @@ class UethMarketMaking(TradingStrategy):
                 if not buy_still_active:
                     self.logger.info(f"Buy order {self.active_buy_order_id} is no longer open (likely filled or cancelled)")
                     self.active_buy_order_id = None
+                    self.active_buy_order_time = None
             
             # Check sell order status
             if self.active_sell_order_id:
@@ -348,6 +359,7 @@ class UethMarketMaking(TradingStrategy):
                 if not sell_still_active:
                     self.logger.info(f"Sell order {self.active_sell_order_id} is no longer open (likely filled or cancelled)")
                     self.active_sell_order_id = None
+                    self.active_sell_order_time = None
                     
             return buy_still_active, sell_still_active
             
@@ -392,6 +404,55 @@ class UethMarketMaking(TradingStrategy):
                 if backoff_time > current_time:
                     time.sleep(0.1)
                     continue
+                
+                # Check if orders need to be cancelled due to age
+                need_cancel_buy = False
+                need_cancel_sell = False
+                
+                # Check buy order age
+                if self.active_buy_order_id and self.active_buy_order_time and \
+                (current_time - self.active_buy_order_time) > self.order_max_age:
+                    self.logger.info(f"Buy order {self.active_buy_order_id} exceeded max age of {self.order_max_age}s, cancelling")
+                    self.order_handler.cancel_order(self.symbol, self.active_buy_order_id)
+                    self.active_buy_order_id = None
+                    self.active_buy_order_time = None
+                    need_cancel_buy = True
+                
+                # Check sell order age
+                if self.active_sell_order_id and self.active_sell_order_time and \
+                (current_time - self.active_sell_order_time) > self.order_max_age:
+                    self.logger.info(f"Sell order {self.active_sell_order_id} exceeded max age of {self.order_max_age}s, cancelling")
+                    self.order_handler.cancel_order(self.symbol, self.active_sell_order_id)
+                    self.active_sell_order_id = None
+                    self.active_sell_order_time = None
+                    need_cancel_sell = True
+                
+                # If we cancelled any orders, we need fresh market data to place new ones
+                if need_cancel_buy or need_cancel_sell:
+                    # Get fresh market data
+                    market_data = self.api_connector.get_market_data(self.symbol)
+                    if "error" in market_data:
+                        self.set_status(f"Error getting market data after cancel: {market_data['error']}")
+                        time.sleep(1)
+                    else:
+                        # Update mid price
+                        if "mid_price" in market_data:
+                            self.mid_price = market_data["mid_price"]
+                        elif "best_bid" in market_data and "best_ask" in market_data:
+                            best_bid = market_data["best_bid"]
+                            best_ask = market_data["best_ask"]
+                            self.mid_price = (best_bid + best_ask) / 2
+                        
+                        # Get latest balances
+                        asset_balance, quote_balance = self.get_balances()
+                        
+                        # Place new orders if needed
+                        if need_cancel_buy and quote_balance > 1.0:
+                            self._place_buy_order(market_data)
+                            
+                        if need_cancel_sell and asset_balance > 0.00001:
+                            self._place_sell_order(market_data, asset_balance)
+                # END of new auto-cancel block
                 
                 # Check if it's time to refresh
                 refresh_needed = (current_time - self.last_tick_time) >= self.refresh_time
@@ -475,11 +536,13 @@ class UethMarketMaking(TradingStrategy):
                 self.order_handler.cancel_order(self.symbol, self.active_buy_order_id)
                 self.logger.info(f"Cancelled buy order {self.active_buy_order_id}")
                 self.active_buy_order_id = None
+                self.active_buy_order_time = None
                 
             if self.active_sell_order_id:
                 self.order_handler.cancel_order(self.symbol, self.active_sell_order_id)
                 self.logger.info(f"Cancelled sell order {self.active_sell_order_id}")
                 self.active_sell_order_id = None
+                self.active_sell_order_time = None
                 
         except Exception as e:
             self.logger.error(f"Error cancelling orders: {str(e)}")
@@ -597,12 +660,21 @@ class UethMarketMaking(TradingStrategy):
         """
         try:
             asset_balance, quote_balance = self.get_balances()
+
+            # NEW: Calculate order ages
+            current_time = time.time()
+            buy_order_age = (current_time - self.active_buy_order_time) if self.active_buy_order_time else 0
+            sell_order_age = (current_time - self.active_sell_order_time) if self.active_sell_order_time else 0
+            
             
             metrics = {
                 "symbol": self.symbol,
                 "mid_price": self.mid_price,
                 "has_buy_order": self.active_buy_order_id is not None,
                 "has_sell_order": self.active_sell_order_id is not None,
+                "buy_order_age": f"{buy_order_age:.1f}s" if buy_order_age > 0 else "N/A",  # NEW: Add this line
+                "sell_order_age": f"{sell_order_age:.1f}s" if sell_order_age > 0 else "N/A",  # NEW: Add this line
+                "order_max_age": f"{self.order_max_age}s",  # NEW: Add this line
                 "asset_balance": asset_balance,
                 "quote_balance": quote_balance,
                 "order_size": self.order_amount,

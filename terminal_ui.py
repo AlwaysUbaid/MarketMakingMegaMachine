@@ -7,6 +7,7 @@ import json
 import queue
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
+from cross_ex_terminal_commands import CrossExchangeCommands
 
 class ElysiumTerminalUI(cmd.Cmd):
     """Command-line interface for MMMM Trading Platform"""
@@ -1113,3 +1114,8 @@ class ElysiumTerminalUI(cmd.Cmd):
         for strategy in strategies:
             print(f"  - {strategy['name']} ({strategy['module']})")
             print(f"    {strategy['description']}")
+
+        # Extend ElysiumTerminalUI with cross-exchange commands
+    for name, method in CrossExchangeCommands.__dict__.items():
+        if name.startswith('do_'):
+            setattr(ElysiumTerminalUI, name, method)
