@@ -9,6 +9,8 @@ from typing import Dict, Optional, List, Union, Any
 from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 
+# Import our new Bybit connector
+from bybit_connector import BybitConnector
 
 
 class OrderHandler:
@@ -19,7 +21,28 @@ class OrderHandler:
         self.info = info
         self.wallet_address = None
         self.logger = logging.getLogger(__name__)
-        self.api_connector = None
+
+        # Add Bybit-specific properties
+        self.bybit_connector = None
+        self.api_connector = None  # Will be set from main.py
+        self.current_exchange = "hyperliquid"  # Default exchange
+    
+    def set_bybit_connector(self, bybit_connector: BybitConnector):
+        """Set the Bybit connector"""
+        self.bybit_connector = bybit_connector
+    
+    def set_exchange(self, exchange_name: str):
+        """
+        Set the current active exchange for order execution
+        
+        Args:
+            exchange_name: "hyperliquid" or "bybit"
+        """
+        if exchange_name.lower() in ["hyperliquid", "bybit"]:
+            self.current_exchange = exchange_name.lower()
+            self.logger.info(f"Set current exchange to {self.current_exchange}")
+        else:
+            self.logger.error(f"Unknown exchange: {exchange_name}")
 
     # =================================Spot Trading==============================================
     def market_buy(self, symbol: str, size: float, slippage: float = 0.05) -> Dict[str, Any]:
@@ -815,429 +838,858 @@ class OrderHandler:
         from hyperliquid.utils.signing import get_timestamp_ms
         return get_timestamp_ms()        
         
-# =======================================TWAPS==================================================
-
-class TwapExecution:
-    """Handles TWAP (Time-Weighted Average Price) order execution"""
+        # =================================Spot Trading for Bybit==============================================
     
-    def __init__(self, order_handler, symbol: str, side: str, total_quantity: float, 
-                duration_minutes: int, num_slices: int, price_limit: Optional[float] = None,
-                is_perp: bool = False, leverage: int = 1):
+    def bybit_market_buy(self, symbol: str, size: float) -> Dict[str, Any]:
         """
-        Initialize TWAP execution
-        
-        Args:
-            order_handler: The order handler object that executes orders
-            symbol: Trading pair symbol
-            side: 'buy' or 'sell'
-            total_quantity: Total quantity to execute
-            duration_minutes: Total duration in minutes
-            num_slices: Number of slices to divide the order into
-            price_limit: Optional price limit for each slice
-            is_perp: Whether this is a perpetual futures order
-            leverage: Leverage to use for perpetual orders
-        """
-        self.order_handler = order_handler
-        self.symbol = symbol
-        self.side = side.lower()
-        self.total_quantity = total_quantity
-        self.duration_minutes = duration_minutes
-        self.num_slices = num_slices
-        self.price_limit = price_limit
-        self.is_perp = is_perp
-        self.leverage = leverage
-        
-        # Calculate parameters
-        self.quantity_per_slice = total_quantity / num_slices
-        self.interval_seconds = (duration_minutes * 60) / num_slices
-        
-        # Initialize tracking variables
-        self.is_running = False
-        self.start_time = None
-        self.end_time = None
-        self.slices_executed = 0
-        self.total_executed = 0.0
-        self.average_price = 0.0
-        self.execution_prices = []
-        self.errors = []
-        self.thread = None
-        self.stop_event = threading.Event()
-        
-        self.logger = logging.getLogger(__name__)
-    
-    def start(self) -> bool:
-        """Start the TWAP execution"""
-        if self.is_running:
-            self.logger.warning("TWAP execution already running")
-            return False
-        
-        self.start_time = datetime.now()
-        self.end_time = self.start_time + timedelta(minutes=self.duration_minutes)
-        self.is_running = True
-        self.stop_event.clear()
-        
-        self.logger.info(f"Starting TWAP execution for {self.total_quantity} {self.symbol} "
-                        f"over {self.duration_minutes} minutes in {self.num_slices} slices")
-        
-        # Start execution thread
-        self.thread = threading.Thread(target=self._execute_strategy)
-        self.thread.daemon = True
-        self.thread.start()
-        
-        return True
-    
-    def stop(self) -> bool:
-        """Stop the TWAP execution"""
-        if not self.is_running:
-            self.logger.warning("TWAP execution not running")
-            return False
-        
-        self.logger.info("Stopping TWAP execution")
-        self.stop_event.set()
-        if self.thread:
-            self.thread.join(timeout=5)
-        
-        self.is_running = False
-        return True
-    
-    def get_status(self) -> Dict[str, Any]:
-        """Get the current status of the TWAP execution"""
-        return {
-            "symbol": self.symbol,
-            "side": self.side,
-            "is_perp": self.is_perp,
-            "total_quantity": self.total_quantity,
-            "duration_minutes": self.duration_minutes,
-            "num_slices": self.num_slices,
-            "quantity_per_slice": self.quantity_per_slice,
-            "interval_seconds": self.interval_seconds,
-            "is_running": self.is_running,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "slices_executed": self.slices_executed,
-            "total_executed": self.total_executed,
-            "average_price": self.average_price,
-            "remaining_quantity": self.total_quantity - self.total_executed,
-            "completion_percentage": (self.slices_executed / self.num_slices) * 100 if self.num_slices > 0 else 0,
-            "errors": self.errors
-        }
-    
-    def _execute_strategy(self) -> None:
-        """Execute the TWAP strategy - runs in a separate thread"""
-        try:
-            for slice_num in range(self.num_slices):
-                # Check if we should stop
-                if self.stop_event.is_set():
-                    self.logger.info("TWAP execution stopped by user")
-                    break
-                
-                # Execute slice
-                slice_start_time = time.time()
-                self._execute_slice(slice_num + 1)
-                self.slices_executed += 1
-                
-                # Wait until the next interval, unless it's the last slice
-                if slice_num < self.num_slices - 1:
-                    # Calculate time to wait
-                    elapsed = time.time() - slice_start_time
-                    wait_time = max(0, self.interval_seconds - elapsed)
-                    
-                    # Wait, but check for stop event every second
-                    for _ in range(int(wait_time)):
-                        if self.stop_event.is_set():
-                            self.logger.info("TWAP execution stopped during interval wait")
-                            break
-                        time.sleep(1)
-                    
-                    # Sleep any remaining fraction of a second
-                    time.sleep(wait_time - int(wait_time))
-            
-            if self.slices_executed == self.num_slices:
-                self.logger.info("TWAP execution completed successfully")
-            else:
-                self.logger.info(f"TWAP execution stopped after {self.slices_executed}/{self.num_slices} slices")
-        
-        except Exception as e:
-            self.logger.error(f"Error in TWAP execution: {str(e)}")
-            self.errors.append(str(e))
-        
-        finally:
-            self.is_running = False
-    
-    def _execute_slice(self, slice_num: int) -> None:
-        """Execute a single slice of the TWAP order"""
-        try:
-            self.logger.info(f"Executing TWAP slice {slice_num}/{self.num_slices} for {self.quantity_per_slice} {self.symbol}")
-            
-            # Execute the slice based on side and type (spot or perp)
-            result = None
-            
-            if self.is_perp:
-                # Perpetual order
-                if self.side == 'buy':
-                    if self.price_limit:
-                        result = self.order_handler.perp_limit_buy(self.symbol, self.quantity_per_slice, 
-                                                                self.price_limit, self.leverage)
-                    else:
-                        result = self.order_handler.perp_market_buy(self.symbol, self.quantity_per_slice, 
-                                                                self.leverage)
-                else:  # sell
-                    if self.price_limit:
-                        result = self.order_handler.perp_limit_sell(self.symbol, self.quantity_per_slice, 
-                                                                self.price_limit, self.leverage)
-                    else:
-                        result = self.order_handler.perp_market_sell(self.symbol, self.quantity_per_slice, 
-                                                                    self.leverage)
-            else:
-                # Spot order
-                if self.side == 'buy':
-                    if self.price_limit:
-                        result = self.order_handler.limit_buy(self.symbol, self.quantity_per_slice, self.price_limit)
-                    else:
-                        result = self.order_handler.market_buy(self.symbol, self.quantity_per_slice)
-                else:  # sell
-                    if self.price_limit:
-                        result = self.order_handler.limit_sell(self.symbol, self.quantity_per_slice, self.price_limit)
-                    else:
-                        result = self.order_handler.market_sell(self.symbol, self.quantity_per_slice)
-            
-            # Process the result
-            if result and result["status"] == "ok":
-                if "response" in result and "data" in result["response"] and "statuses" in result["response"]["data"]:
-                    for status in result["response"]["data"]["statuses"]:
-                        if "filled" in status:
-                            filled = status["filled"]
-                            executed_qty = float(filled["totalSz"])
-                            executed_price = float(filled["avgPx"])
-                            
-                            self.total_executed += executed_qty
-                            self.execution_prices.append(executed_price)
-                            
-                            # Update average price
-                            if self.execution_prices:
-                                self.average_price = sum(self.execution_prices) / len(self.execution_prices)
-                            
-                            self.logger.info(f"TWAP slice {slice_num} executed: {executed_qty} @ {executed_price}")
-            else:
-                error_msg = result.get("message", "Unknown error") if result else "No result returned"
-                self.logger.error(f"TWAP slice {slice_num} failed: {error_msg}")
-                self.errors.append(f"Slice {slice_num}: {error_msg}")
-        
-        except Exception as e:
-            self.logger.error(f"Error executing TWAP slice {slice_num}: {str(e)}")
-            self.errors.append(f"Slice {slice_num}: {str(e)}")
-
-
-    # Now add the TWAP manager methods to the OrderHandler class
-    def __init_twap_if_needed(self):
-        """Initialize TWAP components if needed"""
-        if not hasattr(self, 'active_twaps'):
-            self.active_twaps = {}  # Dictionary to store active TWAP executions by ID
-            self.completed_twaps = {}  # Dictionary to store completed TWAP executions by ID
-            self.twap_id_counter = 1
-            self.twap_lock = threading.Lock()  # Lock for thread safety
-
-    def create_twap(self, symbol: str, side: str, quantity: float, 
-                duration_minutes: int, num_slices: int, 
-                price_limit: Optional[float] = None,
-                is_perp: bool = False, leverage: int = 1) -> str:
-        """
-        Create a new TWAP execution
+        Execute a market buy order on Bybit
         
         Args:
             symbol: Trading pair symbol
-            side: 'buy' or 'sell'
-            quantity: Total quantity to execute
-            duration_minutes: Total duration in minutes
-            num_slices: Number of slices to divide the order into
-            price_limit: Optional price limit for each slice
-            is_perp: Whether this is a perpetual futures order
-            leverage: Leverage to use for perpetual orders
+            size: Order size
             
         Returns:
-            str: A unique ID for the TWAP execution
+            Order response dictionary
         """
-        self.__init_twap_if_needed()
-        
-        with self.twap_lock:
-            twap_id = f"twap_{datetime.now().strftime('%Y%m%d%H%M%S')}_{self.twap_id_counter}"
-            self.twap_id_counter += 1
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
             
-            twap = TwapExecution(
-                self,
-                symbol,
-                side,
-                quantity,
-                duration_minutes,
-                num_slices,
-                price_limit,
-                is_perp,
-                leverage
+        try:
+            self.logger.info(f"Executing Bybit market buy: {size} {symbol}")
+            
+            # Normalize symbol format if needed (e.g., "BTC/USDT" -> "BTCUSDT")
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
+            else:
+                normalized_symbol = symbol
+            
+            # Determine category based on symbol
+            category = self._get_bybit_category(symbol)
+            
+            result = self.bybit_connector.http_client.place_order(
+                category=category,
+                symbol=normalized_symbol,
+                side="Buy",
+                orderType="Market",
+                qty=str(size),
+                timeInForce="GTC"
             )
             
-            self.active_twaps[twap_id] = twap
-            self.logger.info(f"Created TWAP {twap_id} for {quantity} {symbol}")
-            
-            return twap_id
-
-    def start_twap(self, twap_id: str) -> bool:
-        """
-        Start a TWAP execution
-        
-        Args:
-            twap_id: The ID of the TWAP execution to start
-            
-        Returns:
-            bool: True if started successfully, False otherwise
-        """
-        self.__init_twap_if_needed()
-        
-        with self.twap_lock:
-            if twap_id not in self.active_twaps:
-                self.logger.error(f"Cannot start TWAP {twap_id} - not found")
-                return False
-            
-            twap = self.active_twaps[twap_id]
-            success = twap.start()
-            
-            if success:
-                self.logger.info(f"Started TWAP {twap_id}")
+            if result["retCode"] == 0:
+                self.logger.info(f"Bybit market buy executed successfully: {size} {symbol}")
+                return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"totalSz": size}}]}}}
             else:
-                self.logger.warning(f"Failed to start TWAP {twap_id}")
-            
-            return success
-
-    def stop_twap(self, twap_id: str) -> bool:
-        """
-        Stop a TWAP execution
-        
-        Args:
-            twap_id: The ID of the TWAP execution to stop
-            
-        Returns:
-            bool: True if stopped successfully, False otherwise
-        """
-        self.__init_twap_if_needed()
-        
-        with self.twap_lock:
-            if twap_id not in self.active_twaps:
-                self.logger.error(f"Cannot stop TWAP {twap_id} - not found")
-                return False
-            
-            twap = self.active_twaps[twap_id]
-            success = twap.stop()
-            
-            if success:
-                self.logger.info(f"Stopped TWAP {twap_id}")
+                self.logger.error(f"Bybit market buy error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
                 
-                # Move to completed if it's no longer running
-                if not twap.is_running:
-                    self.completed_twaps[twap_id] = twap
-                    del self.active_twaps[twap_id]
-            else:
-                self.logger.warning(f"Failed to stop TWAP {twap_id}")
+        except Exception as e:
+            self.logger.error(f"Error in Bybit market buy: {str(e)}")
+            return {"status": "error", "message": str(e)}
             
-            return success
-
-    def get_twap_status(self, twap_id: str) -> Optional[Dict[str, Any]]:
+    def bybit_market_sell(self, symbol: str, size: float) -> Dict[str, Any]:
         """
-        Get the status of a TWAP execution
+        Execute a market sell order on Bybit
         
         Args:
-            twap_id: The ID of the TWAP execution
+            symbol: Trading pair symbol
+            size: Order size
             
         Returns:
-            Dict or None: The status of the TWAP execution, or None if not found
+            Order response dictionary
         """
-        self.__init_twap_if_needed()
-        
-        with self.twap_lock:
-            if twap_id in self.active_twaps:
-                twap = self.active_twaps[twap_id]
-                status = twap.get_status()
-                status["id"] = twap_id
-                status["status"] = "active"
-                return status
-            elif twap_id in self.completed_twaps:
-                twap = self.completed_twaps[twap_id]
-                status = twap.get_status()
-                status["id"] = twap_id
-                status["status"] = "completed"
-                return status
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
+            
+        try:
+            self.logger.info(f"Executing Bybit market sell: {size} {symbol}")
+            
+            # Normalize symbol format if needed
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
             else:
-                self.logger.error(f"Cannot get status for TWAP {twap_id} - not found")
-                return None
-
-    def list_twaps(self) -> Dict[str, List[Dict[str, Any]]]:
+                normalized_symbol = symbol
+            
+            # Determine category based on symbol
+            category = self._get_bybit_category(symbol)
+            
+            result = self.bybit_connector.http_client.place_order(
+                category=category,
+                symbol=normalized_symbol,
+                side="Sell",
+                orderType="Market",
+                qty=str(size),
+                timeInForce="GTC"
+            )
+            
+            if result["retCode"] == 0:
+                self.logger.info(f"Bybit market sell executed successfully: {size} {symbol}")
+                return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"totalSz": size}}]}}}
+            else:
+                self.logger.error(f"Bybit market sell error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
+                
+        except Exception as e:
+            self.logger.error(f"Error in Bybit market sell: {str(e)}")
+            return {"status": "error", "message": str(e)}
+    
+    def bybit_limit_buy(self, symbol: str, size: float, price: float) -> Dict[str, Any]:
         """
-        List all TWAP executions
+        Place a limit buy order on Bybit
         
+        Args:
+            symbol: Trading pair symbol
+            size: Order size
+            price: Limit price
+            
         Returns:
-            Dict: A dictionary with 'active' and 'completed' lists of TWAP executions
+            Order response dictionary
         """
-        self.__init_twap_if_needed()
-        
-        with self.twap_lock:
-            active = []
-            for twap_id, twap in self.active_twaps.items():
-                status = twap.get_status()
-                status["id"] = twap_id
-                status["status"] = "active"
-                active.append(status)
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
             
-            completed = []
-            for twap_id, twap in self.completed_twaps.items():
-                status = twap.get_status()
-                status["id"] = twap_id
-                status["status"] = "completed"
-                completed.append(status)
+        try:
+            self.logger.info(f"Placing Bybit limit buy: {size} {symbol} @ {price}")
             
-            return {
-                "active": active,
-                "completed": completed
-            }
-
-    def clean_completed_twaps(self) -> int:
+            # Normalize symbol format
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
+            else:
+                normalized_symbol = symbol
+            
+            # Determine category based on symbol
+            category = self._get_bybit_category(symbol)
+            
+            result = self.bybit_connector.http_client.place_order(
+                category=category,
+                symbol=normalized_symbol,
+                side="Buy",
+                orderType="Limit",
+                qty=str(size),
+                price=str(price),
+                timeInForce="GTC"
+            )
+            
+            if result["retCode"] == 0:
+                order_id = result["result"]["orderId"]
+                self.logger.info(f"Bybit limit buy placed: order ID {order_id}")
+                return {"status": "ok", "response": {"data": {"statuses": [{"resting": {"oid": order_id}}]}}}
+            else:
+                self.logger.error(f"Bybit limit buy error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
+                
+        except Exception as e:
+            self.logger.error(f"Error in Bybit limit buy: {str(e)}")
+            return {"status": "error", "message": str(e)}
+    
+    def bybit_limit_sell(self, symbol: str, size: float, price: float) -> Dict[str, Any]:
         """
-        Clean up completed TWAP executions
+        Place a limit sell order on Bybit
         
+        Args:
+            symbol: Trading pair symbol
+            size: Order size
+            price: Limit price
+            
         Returns:
-            int: The number of completed TWAP executions that were cleaned up
+            Order response dictionary
         """
-        self.__init_twap_if_needed()
-        
-        with self.twap_lock:
-            count = len(self.completed_twaps)
-            self.completed_twaps.clear()
-            self.logger.info(f"Cleaned up {count} completed TWAP executions")
-            return count
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
+            
+        try:
+            self.logger.info(f"Placing Bybit limit sell: {size} {symbol} @ {price}")
+            
+            # Normalize symbol format
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
+            else:
+                normalized_symbol = symbol
+            
+            # Determine category based on symbol
+            category = self._get_bybit_category(symbol)
+            
+            result = self.bybit_connector.http_client.place_order(
+                category=category,
+                symbol=normalized_symbol,
+                side="Sell",
+                orderType="Limit",
+                qty=str(size),
+                price=str(price),
+                timeInForce="GTC"
+            )
+            
+            if result["retCode"] == 0:
+                order_id = result["result"]["orderId"]
+                self.logger.info(f"Bybit limit sell placed: order ID {order_id}")
+                return {"status": "ok", "response": {"data": {"statuses": [{"resting": {"oid": order_id}}]}}}
+            else:
+                self.logger.error(f"Bybit limit sell error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
+                
+        except Exception as e:
+            self.logger.error(f"Error in Bybit limit sell: {str(e)}")
+            return {"status": "error", "message": str(e)}
 
-    def stop_all_twaps(self) -> int:
+    # =================================Perp Trading for Bybit==============================================
+    
+    def bybit_perp_market_buy(self, symbol: str, size: float, leverage: int = 1) -> Dict[str, Any]:
         """
-        Stop all active TWAP executions
+        Execute a perpetual market buy order on Bybit
         
+        Args:
+            symbol: Trading pair symbol
+            size: Contract size
+            leverage: Leverage multiplier (default 1x)
+            
         Returns:
-            int: The number of TWAP executions that were stopped
+            Order response dictionary
         """
-        self.__init_twap_if_needed()
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
+            
+        try:
+            # Set leverage first
+            self._bybit_set_leverage(symbol, leverage)
+            
+            self.logger.info(f"Executing Bybit perp market buy: {size} {symbol} with {leverage}x leverage")
+            
+            # Normalize symbol format
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
+            else:
+                normalized_symbol = symbol
+            
+            # For perpetual, we use linear or inverse category
+            category = "linear" if "USDT" in normalized_symbol else "inverse"
+            
+            result = self.bybit_connector.http_client.place_order(
+                category=category,
+                symbol=normalized_symbol,
+                side="Buy",
+                orderType="Market",
+                qty=str(size),
+                timeInForce="GTC"
+            )
+            
+            if result["retCode"] == 0:
+                self.logger.info(f"Bybit perp market buy executed successfully: {size} {symbol}")
+                return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"totalSz": size}}]}}}
+            else:
+                self.logger.error(f"Bybit perp market buy error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
+                
+        except Exception as e:
+            self.logger.error(f"Error in Bybit perp market buy: {str(e)}")
+            return {"status": "error", "message": str(e)}
         
-        with self.twap_lock:
-            count = 0
-            twap_ids = list(self.active_twaps.keys())
+    def bybit_perp_market_sell(self, symbol: str, size: float, leverage: int = 1) -> Dict[str, Any]:
+        """
+        Execute a perpetual market sell order on Bybit
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Contract size
+            leverage: Leverage multiplier (default 1x)
             
-            for twap_id in twap_ids:
-                if self.stop_twap(twap_id):
-                    count += 1
+        Returns:
+            Order response dictionary
+        """
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
             
-            self.logger.info(f"Stopped {count} TWAP executions")
-            return count
+        try:
+            # Set leverage first
+            self._bybit_set_leverage(symbol, leverage)
+            
+            self.logger.info(f"Executing Bybit perp market sell: {size} {symbol} with {leverage}x leverage")
+            
+            # Normalize symbol format
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
+            else:
+                normalized_symbol = symbol
+            
+            # For perpetual, we use linear or inverse category
+            category = "linear" if "USDT" in normalized_symbol else "inverse"
+            
+            result = self.bybit_connector.http_client.place_order(
+                category=category,
+                symbol=normalized_symbol,
+                side="Sell",
+                orderType="Market",
+                qty=str(size),
+                timeInForce="GTC"
+            )
+            
+            if result["retCode"] == 0:
+                self.logger.info(f"Bybit perp market sell executed successfully: {size} {symbol}")
+                return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"totalSz": size}}]}}}
+            else:
+                self.logger.error(f"Bybit perp market sell error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
+                
+        except Exception as e:
+            self.logger.error(f"Error in Bybit perp market sell: {str(e)}")
+            return {"status": "error", "message": str(e)}
+        
+    def bybit_perp_limit_buy(self, symbol: str, size: float, price: float, leverage: int = 1) -> Dict[str, Any]:
+        """
+        Place a perpetual limit buy order on Bybit
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Contract size
+            price: Limit price
+            leverage: Leverage multiplier (default 1x)
+            
+        Returns:
+            Order response dictionary
+        """
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
+            
+        try:
+            # Set leverage first
+            self._bybit_set_leverage(symbol, leverage)
+            
+            self.logger.info(f"Placing Bybit perp limit buy: {size} {symbol} @ {price} with {leverage}x leverage")
+            
+            # Normalize symbol format
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
+            else:
+                normalized_symbol = symbol
+            
+            # For perpetual, we use linear or inverse category
+            category = "linear" if "USDT" in normalized_symbol else "inverse"
+            
+            result = self.bybit_connector.http_client.place_order(
+                category=category,
+                symbol=normalized_symbol,
+                side="Buy",
+                orderType="Limit",
+                qty=str(size),
+                price=str(price),
+                timeInForce="GTC"
+            )
+            
+            if result["retCode"] == 0:
+                order_id = result["result"]["orderId"]
+                self.logger.info(f"Bybit perp limit buy placed: order ID {order_id}")
+                return {"status": "ok", "response": {"data": {"statuses": [{"resting": {"oid": order_id}}]}}}
+            else:
+                self.logger.error(f"Bybit perp limit buy error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
+                
+        except Exception as e:
+            self.logger.error(f"Error in Bybit perp limit buy: {str(e)}")
+            return {"status": "error", "message": str(e)}
+        
+    def bybit_perp_limit_sell(self, symbol: str, size: float, price: float, leverage: int = 1) -> Dict[str, Any]:
+        """
+        Place a perpetual limit sell order on Bybit
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Contract size
+            price: Limit price
+            leverage: Leverage multiplier (default 1x)
+            
+        Returns:
+            Order response dictionary
+        """
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
+            
+        try:
+            # Set leverage first
+            self._bybit_set_leverage(symbol, leverage)
+            
+            self.logger.info(f"Placing Bybit perp limit sell: {size} {symbol} @ {price} with {leverage}x leverage")
+            
+            # Normalize symbol format
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
+            else:
+                normalized_symbol = symbol
+            
+            # For perpetual, we use linear or inverse category
+            category = "linear" if "USDT" in normalized_symbol else "inverse"
+            
+            result = self.bybit_connector.http_client.place_order(
+                category=category,
+                symbol=normalized_symbol,
+                side="Sell",
+                orderType="Limit",
+                qty=str(size),
+                price=str(price),
+                timeInForce="GTC"
+            )
+            
+            if result["retCode"] == 0:
+                order_id = result["result"]["orderId"]
+                self.logger.info(f"Bybit perp limit sell placed: order ID {order_id}")
+                return {"status": "ok", "response": {"data": {"statuses": [{"resting": {"oid": order_id}}]}}}
+            else:
+                self.logger.error(f"Bybit perp limit sell error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
+                
+        except Exception as e:
+            self.logger.error(f"Error in Bybit perp limit sell: {str(e)}")
+            return {"status": "error", "message": str(e)}
 
-    # Add methods to OrderHandler class
-    OrderHandler.__init_twap_if_needed = __init_twap_if_needed
-    OrderHandler.create_twap = create_twap
-    OrderHandler.start_twap = start_twap
-    OrderHandler.stop_twap = stop_twap
-    OrderHandler.get_twap_status = get_twap_status
-    OrderHandler.list_twaps = list_twaps
-    OrderHandler.clean_completed_twaps = clean_completed_twaps
-    OrderHandler.stop_all_twaps = stop_all_twaps
+    def bybit_close_position(self, symbol: str) -> Dict[str, Any]:
+        """
+        Close an entire perpetual position for a symbol on Bybit
+        
+        Args:
+            symbol: Trading pair symbol
+            
+        Returns:
+            Order response dictionary
+        """
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
+            
+        try:
+            self.logger.info(f"Closing Bybit position for {symbol}")
+            
+            # Normalize symbol format
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
+            else:
+                normalized_symbol = symbol
+            
+            # For perpetual, we use linear or inverse category
+            category = "linear" if "USDT" in normalized_symbol else "inverse"
+            
+            # First, get the position
+            positions = self.bybit_connector.get_positions()
+            position = next((p for p in positions if p["symbol"] == normalized_symbol), None)
+            
+            if not position or float(position["size"]) == 0:
+                self.logger.warning(f"No position found for {symbol}")
+                return {"status": "error", "message": "No position found"}
+            
+            # Determine side for closing (opposite of position)
+            size = abs(float(position["size"]))
+            side = "Sell" if float(position["size"]) > 0 else "Buy"
+            
+            # Place market order to close
+            result = self.bybit_connector.http_client.place_order(
+                category=category,
+                symbol=normalized_symbol,
+                side=side,
+                orderType="Market",
+                qty=str(size),
+                reduceOnly=True,
+                timeInForce="GTC"
+            )
+            
+            if result["retCode"] == 0:
+                self.logger.info(f"Bybit position closed successfully: {size} {symbol}")
+                return {"status": "ok", "response": {"data": {"statuses": [{"filled": {"totalSz": size}}]}}}
+            else:
+                self.logger.error(f"Bybit position close error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
+                
+        except Exception as e:
+            self.logger.error(f"Error closing Bybit position: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    def _bybit_set_leverage(self, symbol: str, leverage: int) -> Dict[str, Any]:
+        """
+        Set leverage for a symbol on Bybit
+        
+        Args:
+            symbol: Trading pair symbol
+            leverage: Leverage multiplier
+            
+        Returns:
+            Response dictionary
+        """
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
+            
+        try:
+            # Normalize symbol format
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
+            else:
+                normalized_symbol = symbol
+            
+            # For perpetual, we use linear or inverse category
+            category = "linear" if "USDT" in normalized_symbol else "inverse"
+            
+            self.logger.info(f"Setting {leverage}x leverage for {symbol} on Bybit")
+            
+            result = self.bybit_connector.http_client.set_leverage(
+                category=category,
+                symbol=normalized_symbol,
+                buyLeverage=str(leverage),
+                sellLeverage=str(leverage)
+            )
+            
+            if result["retCode"] == 0:
+                self.logger.info(f"Leverage set to {leverage}x for {symbol}")
+                return {"status": "ok"}
+            else:
+                self.logger.error(f"Set leverage error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
+                
+        except Exception as e:
+            self.logger.error(f"Error setting leverage on Bybit: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    # =================================Order Management for Bybit==============================================
+    
+    def bybit_cancel_order(self, symbol: str, order_id: str) -> Dict[str, Any]:
+        """
+        Cancel a specific order on Bybit
+        
+        Args:
+            symbol: Trading pair symbol
+            order_id: Order ID to cancel
+            
+        Returns:
+            Cancellation response dictionary
+        """
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
+            
+        try:
+            self.logger.info(f"Cancelling Bybit order {order_id} for {symbol}")
+            
+            # Normalize symbol format
+            if "/" in symbol:
+                base, quote = symbol.split("/")
+                normalized_symbol = f"{base}{quote}"
+            else:
+                normalized_symbol = symbol
+            
+            # Determine category based on symbol
+            category = self._get_bybit_category(symbol)
+            
+            result = self.bybit_connector.http_client.cancel_order(
+                category=category,
+                symbol=normalized_symbol,
+                orderId=order_id
+            )
+            
+            if result["retCode"] == 0:
+                self.logger.info(f"Bybit order {order_id} cancelled successfully")
+                return {"status": "ok"}
+            else:
+                self.logger.error(f"Bybit cancel order error: {result['retMsg']}")
+                return {"status": "error", "message": result["retMsg"]}
+                
+        except Exception as e:
+            self.logger.error(f"Error cancelling Bybit order: {str(e)}")
+            return {"status": "error", "message": str(e)}
+    
+    def bybit_cancel_all_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Cancel all open orders on Bybit, optionally filtered by symbol
+        
+        Args:
+            symbol: Optional trading pair symbol to filter cancellations
+            
+        Returns:
+            Dictionary with cancellation results
+        """
+        if not self.bybit_connector or not self.bybit_connector.http_client:
+            return {"status": "error", "message": "Not connected to Bybit"}
+            
+        try:
+            symbol_str = f" for {symbol}" if symbol else ""
+            self.logger.info(f"Cancelling all Bybit orders{symbol_str}")
+            
+            # Normalize symbol format if provided
+            normalized_symbol = None
+            if symbol:
+                if "/" in symbol:
+                    base, quote = symbol.split("/")
+                    normalized_symbol = f"{base}{quote}"
+                else:
+                    normalized_symbol = symbol
+            
+            # Cancel orders for each category
+            categories = ["spot", "linear", "inverse"]
+            results = {"cancelled": 0, "failed": 0, "details": []}
+            
+            for category in categories:
+                try:
+                    cancel_args = {"category": category}
+                    if normalized_symbol:
+                        cancel_args["symbol"] = normalized_symbol
+                    
+                    result = self.bybit_connector.http_client.cancel_all_orders(**cancel_args)
+                    
+                    if result["retCode"] == 0:
+                        # Count cancelled orders
+                        if "list" in result["result"]:
+                            cancelled_count = len(result["result"]["list"])
+                            results["cancelled"] += cancelled_count
+                            results["details"].append({
+                                "category": category,
+                                "count": cancelled_count
+                            })
+                    else:
+                        results["failed"] += 1
+                        results["details"].append({
+                            "category": category,
+                            "error": result["retMsg"]
+                        })
+                except Exception as e:
+                    self.logger.warning(f"Error cancelling {category} orders: {str(e)}")
+                    results["failed"] += 1
+                    results["details"].append({
+                        "category": category,
+                        "error": str(e)
+                    })
+            
+            self.logger.info(f"Cancelled {results['cancelled']} Bybit orders, {results['failed']} failures")
+            return {"status": "ok", "data": results}
+                
+        except Exception as e:
+            self.logger.error(f"Error cancelling all Bybit orders: {str(e)}")
+            return {"status": "error", "message": str(e)}
+
+    # =================================Exchange Routing==============================================
+
+    def market_buy(self, symbol: str, size: float, slippage: float = 0.05) -> Dict[str, Any]:
+        """
+        Execute a market buy order on the current exchange
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Order size
+            slippage: Maximum acceptable slippage (default 5%)
+            
+        Returns:
+            Order response dictionary
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_market_buy(symbol, size)
+        else:
+            return super().market_buy(symbol, size, slippage)
+            
+    def market_sell(self, symbol: str, size: float, slippage: float = 0.05) -> Dict[str, Any]:
+        """
+        Execute a market sell order on the current exchange
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Order size
+            slippage: Maximum acceptable slippage (default 5%)
+            
+        Returns:
+            Order response dictionary
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_market_sell(symbol, size)
+        else:
+            return super().market_sell(symbol, size, slippage)
+    
+    def limit_buy(self, symbol: str, size: float, price: float) -> Dict[str, Any]:
+        """
+        Place a limit buy order on the current exchange
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Order size
+            price: Limit price
+            
+        Returns:
+            Order response dictionary
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_limit_buy(symbol, size, price)
+        else:
+            return super().limit_buy(symbol, size, price)
+    
+    def limit_sell(self, symbol: str, size: float, price: float) -> Dict[str, Any]:
+        """
+        Place a limit sell order on the current exchange
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Order size
+            price: Limit price
+            
+        Returns:
+            Order response dictionary
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_limit_sell(symbol, size, price)
+        else:
+            return super().limit_sell(symbol, size, price)
+    
+    def perp_market_buy(self, symbol: str, size: float, leverage: int = 1, slippage: float = 0.05) -> Dict[str, Any]:
+        """
+        Execute a perpetual market buy order on the current exchange
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Contract size
+            leverage: Leverage multiplier (default 1x)
+            slippage: Maximum acceptable slippage (default 5%)
+            
+        Returns:
+            Order response dictionary
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_perp_market_buy(symbol, size, leverage)
+        else:
+            return super().perp_market_buy(symbol, size, leverage, slippage)
+        
+    def perp_market_sell(self, symbol: str, size: float, leverage: int = 1, slippage: float = 0.05) -> Dict[str, Any]:
+        """
+        Execute a perpetual market sell order on the current exchange
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Contract size
+            leverage: Leverage multiplier (default 1x)
+            slippage: Maximum acceptable slippage (default 5%)
+            
+        Returns:
+            Order response dictionary
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_perp_market_sell(symbol, size, leverage)
+        else:
+            return super().perp_market_sell(symbol, size, leverage, slippage)
+        
+    def perp_limit_buy(self, symbol: str, size: float, price: float, leverage: int = 1) -> Dict[str, Any]:
+        """
+        Place a perpetual limit buy order on the current exchange
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Contract size
+            price: Limit price
+            leverage: Leverage multiplier (default 1x)
+            
+        Returns:
+            Order response dictionary
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_perp_limit_buy(symbol, size, price, leverage)
+        else:
+            return super().perp_limit_buy(symbol, size, price, leverage)
+        
+    def perp_limit_sell(self, symbol: str, size: float, price: float, leverage: int = 1) -> Dict[str, Any]:
+        """
+        Place a perpetual limit sell order on the current exchange
+        
+        Args:
+            symbol: Trading pair symbol
+            size: Contract size
+            price: Limit price
+            leverage: Leverage multiplier (default 1x)
+            
+        Returns:
+            Order response dictionary
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_perp_limit_sell(symbol, size, price, leverage)
+        else:
+            return super().perp_limit_sell(symbol, size, price, leverage)
+
+    def close_position(self, symbol: str, slippage: float = 0.05) -> Dict[str, Any]:
+        """
+        Close an entire perpetual position for a symbol
+        
+        Args:
+            symbol: Trading pair symbol
+            slippage: Maximum acceptable slippage (default 5%)
+            
+        Returns:
+            Order response dictionary
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_close_position(symbol)
+        else:
+            return super().close_position(symbol, slippage)
+    
+    def cancel_order(self, symbol: str, order_id: Union[int, str]) -> Dict[str, Any]:
+        """
+        Cancel a specific order
+        
+        Args:
+            symbol: Trading pair symbol
+            order_id: Order ID to cancel
+            
+        Returns:
+            Cancellation response dictionary
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_cancel_order(symbol, str(order_id))
+        else:
+            return super().cancel_order(symbol, order_id)
+    
+    def cancel_all_orders(self, symbol: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Cancel all open orders, optionally filtered by symbol
+        
+        Args:
+            symbol: Optional trading pair symbol to filter cancellations
+            
+        Returns:
+            Dictionary with cancellation results
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_cancel_all_orders(symbol)
+        else:
+            return super().cancel_all_orders(symbol)
+    
+    def get_open_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Get all open orders, optionally filtered by symbol
+        
+        Args:
+            symbol: Optional trading pair symbol to filter results
+            
+        Returns:
+            List of open orders
+        """
+        if self.current_exchange == "bybit":
+            return self.bybit_connector.get_open_orders(symbol)
+        else:
+            return super().get_open_orders(symbol)
+
+    # =================================Helper Methods==============================================
+    
+    def _get_bybit_category(self, symbol: str) -> str:
+        """
+        Determine the market category for a symbol on Bybit
+        
+        Args:
+            symbol: Trading pair symbol
+            
+        Returns:
+            Category string: "spot", "linear", or "inverse"
+        """
+        # Handle spot format: "BTC/USDT" -> "spot"
+        if "/" in symbol:
+            return "spot"
+        
+        # Handle perpetual formats
+        if symbol.endswith("USDT"):
+            return "linear"
+        elif symbol.endswith("USD"):
+            return "inverse"
+        
+        # Default to spot for unknown formats
+        return "spot"

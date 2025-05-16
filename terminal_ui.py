@@ -8,11 +8,13 @@ import queue
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 
+from bybit_connector import BybitConnector
+
 class ElysiumTerminalUI(cmd.Cmd):
     """Command-line interface for MMMM Trading Platform"""
     
     VERSION = "1.0.0"
-    intro = None
+    intro = "Welcome to MMMM Trading Platform! Type help or ? to list commands.\n"
 
     ASCII_ART = '''
     ███╗   ███╗███╗   ███╗███╗   ███╗███╗   ███╗
@@ -30,10 +32,20 @@ class ElysiumTerminalUI(cmd.Cmd):
     Type 'help' to see available commands
 
     Useful Commands:
-    - connect     Connect to exchange
-                "connect mainnet" or "connect testnet"
-    - balance     See your exchange balances
-    - positions   Show your open positions
+    - connect           Connect to Hyperliquid
+                      "connect mainnet" or "connect testnet"
+    - connect_bybit     Connect to Bybit 
+                      "connect_bybit mainnet" or "connect_bybit testnet"
+    - switch_exchange   Switch between exchanges
+                      "switch_exchange hyperliquid" or "switch_exchange bybit"
+    - balance           See current exchange balances
+    - positions         Show your open positions
+    - exchange_status   Show status of connected exchanges
+
+    Cross-Exchange Commands:
+    - arb_status        Show arbitrage opportunities across exchanges
+    - start_arb         Start cross-exchange arbitrage with custom parameters
+    - stop_arb          Stop cross-exchange arbitrage
 
     Spot Trading:
     - buy         Execute a market buy
@@ -66,16 +78,33 @@ class ElysiumTerminalUI(cmd.Cmd):
 
     def __init__(self, api_connector, order_handler, config_manager):
         super().__init__()
-        self.prompt = '>>> '
+        self.prompt = '|Market_Making_Mega_Machine-$|->>> '
         self.api_connector = api_connector
         self.order_handler = order_handler
         self.config_manager = config_manager
         self.authenticated = False
         self.last_command_output = ""
 
+        # Add Bybit connector
+        self.bybit_connector = BybitConnector()
+        
+        # Add connected exchanges tracker
+        self.connected_exchanges = {
+            "hyperliquid": False,
+            "bybit": False
+        }
+        
+        # Current active exchange (for display and command routing)
+        self.active_exchange = "hyperliquid"
+
         # Initialize strategy selector
         from strategy_selector import StrategySelector
         self.strategy_selector = StrategySelector(api_connector, order_handler, config_manager)
+
+        # Initialize arbitrage state
+        self.arbitrage_running = False
+        self.arbitrage_thread = None
+        self.arbitrage_stop_event = threading.Event()
         
     def preloop(self):
         """Setup before starting the command loop"""
@@ -125,9 +154,61 @@ class ElysiumTerminalUI(cmd.Cmd):
         print(self.WELCOME_MSG)
         
     def do_connect(self, arg):
+            """
+            Connect to Hyperliquid exchange
+            Usage: connect [mainnet|testnet]
+            Options:
+                mainnet    Connect to mainnet (default)
+                testnet    Connect to testnet
+            """
+            try:
+                # Parse network type from arguments
+                arg_lower = arg.lower()
+                if "testnet" in arg_lower:
+                    use_testnet = True
+                    network_name = "testnet"
+                else:
+                    # Default to mainnet
+                    use_testnet = False
+                    network_name = "mainnet"
+                
+                # Import credentials from dontshareconfig.py
+                import dontshareconfig as ds
+                
+                # Select the appropriate credentials based on network
+                if use_testnet:
+                    wallet_address = ds.testnet_wallet
+                    secret_key = ds.testnet_secret
+                else:
+                    wallet_address = ds.mainnet_wallet
+                    secret_key = ds.mainnet_secret
+                
+                print(f"\nConnecting to Hyperliquid ({network_name})...")
+                success = self.api_connector.connect_hyperliquid(wallet_address, secret_key, use_testnet)
+                
+                if success:
+                    print(f"Successfully connected to {wallet_address}")
+                    # Initialize order handler with the connected exchange and info objects
+                    self.order_handler.exchange = self.api_connector.exchange
+                    self.order_handler.info = self.api_connector.info
+                    self.order_handler.wallet_address = wallet_address
+                    # Update the connected exchanges tracker
+                    self.connected_exchanges["hyperliquid"] = True
+                    
+                    # Set as active exchange
+                    self.active_exchange = "hyperliquid"
+                    self.order_handler.set_exchange("hyperliquid")
+                else:
+                    print("Failed to connect to exchange")
+                        
+            except Exception as e:
+                print(f"Error connecting to exchange: {str(e)}")
+
+    # Add new connect_bybit command
+    def do_connect_bybit(self, arg):
         """
-        Connect to Hyperliquid exchange
-        Usage: connect [mainnet|testnet]
+        Connect to Bybit exchange
+        Usage: connect_bybit [mainnet|testnet]
         Options:
             mainnet    Connect to mainnet (default)
             testnet    Connect to testnet
@@ -148,73 +229,160 @@ class ElysiumTerminalUI(cmd.Cmd):
             
             # Select the appropriate credentials based on network
             if use_testnet:
-                wallet_address = ds.testnet_wallet
-                secret_key = ds.testnet_secret
+                api_key = ds.bybit_testnet_api_key if hasattr(ds, 'bybit_testnet_api_key') else None
+                api_secret = ds.bybit_testnet_api_secret if hasattr(ds, 'bybit_testnet_api_secret') else None
             else:
-                wallet_address = ds.mainnet_wallet
-                secret_key = ds.mainnet_secret
+                api_key = ds.bybit_api_key if hasattr(ds, 'bybit_api_key') else None
+                api_secret = ds.bybit_api_secret if hasattr(ds, 'bybit_api_secret') else None
+                
+            if not api_key or not api_secret:
+                print(f"\nError: Bybit API credentials not found for {network_name}.")
+                print("Please add bybit_api_key and bybit_api_secret to dontshareconfig.py")
+                return
             
-            print(f"\nConnecting to Hyperliquid ({network_name})...")
-            success = self.api_connector.connect_hyperliquid(wallet_address, secret_key, use_testnet)
+            print(f"\nConnecting to Bybit ({network_name})...")
+            success = self.bybit_connector.connect_bybit(api_key, api_secret, use_testnet)
             
             if success:
-                print(f"Successfully connected to {wallet_address}")
-                # Initialize order handler with the connected exchange and info objects
-                self.order_handler.exchange = self.api_connector.exchange
-                self.order_handler.info = self.api_connector.info
-                self.order_handler.wallet_address = wallet_address
+                print(f"Successfully connected to Bybit")
+                # Initialize the order handler with the Bybit connector
+                self.order_handler.set_bybit_connector(self.bybit_connector)
+                # Update the connected exchanges tracker
+                self.connected_exchanges["bybit"] = True
+                
+                # If this is the first connected exchange, set it as active
+                if not self.connected_exchanges["hyperliquid"]:
+                    self.active_exchange = "bybit"
+                    self.order_handler.set_exchange("bybit")
+                    print(f"Set Bybit as the active exchange")
             else:
-                print("Failed to connect to exchange")
+                print("Failed to connect to Bybit exchange")
                     
         except Exception as e:
-            print(f"Error connecting to exchange: {str(e)}")
+            print(f"Error connecting to Bybit: {str(e)}")
     
+    # Add switch_exchange command
+    def do_switch_exchange(self, arg):
+        """
+        Switch between connected exchanges
+        Usage: switch_exchange [hyperliquid|bybit]
+        """
+        arg_lower = arg.lower()
+        
+        if arg_lower not in ["hyperliquid", "bybit"]:
+            print("Invalid exchange. Please use 'hyperliquid' or 'bybit'")
+            return
+            
+        if not self.connected_exchanges[arg_lower]:
+            print(f"Not connected to {arg_lower}. Please connect first.")
+            return
+            
+        self.active_exchange = arg_lower
+        self.order_handler.set_exchange(arg_lower)
+        print(f"Switched to {arg_lower} exchange")
+        
+    # Add exchange_status command
+    def do_exchange_status(self, arg):
+        """
+        Show status of connected exchanges
+        Usage: exchange_status
+        """
+        print("\n=== Exchange Connection Status ===")
+        
+        for exchange, connected in self.connected_exchanges.items():
+            status = "Connected" if connected else "Not connected"
+            active = " (ACTIVE)" if exchange == self.active_exchange else ""
+            print(f"{exchange.capitalize()}: {status}{active}")
+            
+        print(f"\nActive exchange for trading commands: {self.active_exchange.capitalize()}")
+
+    # Added balance command
+    # ============================Balance and Account Management====================================
     def do_balance(self, arg):
         """
         Show current balance across spot and perpetual markets
         Usage: balance
         """
-        if not self.api_connector.exchange:
-            print("Not connected to exchange. Use 'connect' first.")
+        if not self.connected_exchanges[self.active_exchange]:
+            print(f"Not connected to {self.active_exchange}. Use 'connect' or 'connect_bybit' first.")
             return
             
         try:
-            print("\n=== Current Balances ===")
+            print(f"\n=== Current Balances ({self.active_exchange.capitalize()}) ===")
             
-            # Display spot balances
-            print("\nSpot Balances:")
-            spot_state = self.api_connector.info.spot_user_state(self.api_connector.wallet_address)
-            
-            headers = ["Asset", "Available", "Total", "In Orders"]
-            rows = []
-            
-            for balance in spot_state.get("balances", []):
-                rows.append([
-                    balance.get("coin", ""),
-                    float(balance.get("available", 0)),
-                    float(balance.get("total", 0)),
-                    float(balance.get("total", 0)) - float(balance.get("available", 0))
-                ])
-            
-            self._print_table(headers, rows)
-            
-            # Display perpetual balance
-            print("\nPerpetual Account Summary:")
-            perp_state = self.api_connector.info.user_state(self.api_connector.wallet_address)
-            margin_summary = perp_state.get("marginSummary", {})
-            
-            headers = ["Metric", "Value"]
-            rows = [
-                ["Account Value", f"${float(margin_summary.get('accountValue', 0)):.2f}"],
-                ["Total Margin Used", f"${float(margin_summary.get('totalMarginUsed', 0)):.2f}"],
-                ["Total Position Value", f"${float(margin_summary.get('totalNtlPos', 0)):.2f}"]
-            ]
-            
-            self._print_table(headers, rows)
-            
+            if self.active_exchange == "hyperliquid":
+                # Use existing balance display for Hyperliquid
+                # Display spot balances
+                print("\nSpot Balances:")
+                spot_state = self.api_connector.info.spot_user_state(self.api_connector.wallet_address)
+                
+                headers = ["Asset", "Available", "Total", "In Orders"]
+                rows = []
+                
+                for balance in spot_state.get("balances", []):
+                    rows.append([
+                        balance.get("coin", ""),
+                        float(balance.get("available", 0)),
+                        float(balance.get("total", 0)),
+                        float(balance.get("total", 0)) - float(balance.get("available", 0))
+                    ])
+                
+                self._print_table(headers, rows)
+                
+                # Display perpetual balance
+                print("\nPerpetual Account Summary:")
+                perp_state = self.api_connector.info.user_state(self.api_connector.wallet_address)
+                margin_summary = perp_state.get("marginSummary", {})
+                
+                headers = ["Metric", "Value"]
+                rows = [
+                    ["Account Value", f"${float(margin_summary.get('accountValue', 0)):.2f}"],
+                    ["Total Margin Used", f"${float(margin_summary.get('totalMarginUsed', 0)):.2f}"],
+                    ["Total Position Value", f"${float(margin_summary.get('totalNtlPos', 0)):.2f}"]
+                ]
+                
+                self._print_table(headers, rows)
+                
+            else:  # Bybit
+                # Get balances from Bybit connector
+                balances = self.bybit_connector.get_balances()
+                
+                # Display spot balances
+                print("\nSpot Balances:")
+                
+                if balances.get("spot"):
+                    headers = ["Asset", "Available", "Total", "In Orders"]
+                    rows = []
+                    
+                    for balance in balances.get("spot", []):
+                        rows.append([
+                            balance.get("asset", ""),
+                            balance.get("available", 0),
+                            balance.get("total", 0),
+                            balance.get("in_orders", 0)
+                        ])
+                    
+                    self._print_table(headers, rows)
+                else:
+                    print("No spot balances found")
+                
+                # Display perpetual balance
+                print("\nPerpetual Account Summary:")
+                perp = balances.get("perp", {})
+                
+                headers = ["Metric", "Value"]
+                rows = [
+                    ["Account Value", f"${float(perp.get('account_value', 0)):.2f}"],
+                    ["Total Margin Used", f"${float(perp.get('margin_used', 0)):.2f}"],
+                    ["Total Position Value", f"${float(perp.get('position_value', 0)):.2f}"]
+                ]
+                
+                self._print_table(headers, rows)
+                
         except Exception as e:
             print(f"\nError fetching balances: {str(e)}")
-    
+
+    # =================================HL - SOPT Trading==============================================
     def do_buy(self, arg):
         """
         Execute a market buy order
@@ -363,7 +531,7 @@ class ElysiumTerminalUI(cmd.Cmd):
         except Exception as e:
             print(f"\nError placing limit sell order: {str(e)}")
 
-    # =================================Perp Trading==============================================
+    # =================================HL - Perp Trading==============================================
 
     def do_perp_buy(self, arg):
         """
@@ -516,7 +684,9 @@ class ElysiumTerminalUI(cmd.Cmd):
                 
         except Exception as e:
             print(f"\nError placing perpetual limit sell order: {str(e)}")
-# ===================Close Position============================
+
+    # ===================Close Position============================
+
     def do_close_position(self, arg):
         """
         Close an entire perpetual position
@@ -645,91 +815,99 @@ class ElysiumTerminalUI(cmd.Cmd):
             print(f"\nError cancelling orders: {str(e)}")
     
     def do_orders(self, arg):
-        """
-        List all open orders, optionally for a specific symbol
-        Usage: orders [symbol]
-        Example: orders ETH
-        """
-        if not self.api_connector.exchange:
-            print("Not connected to exchange. Use 'connect' first.")
-            return
-            
-        try:
-            symbol = arg.strip() if arg.strip() else None
-            symbol_text = f" for {symbol}" if symbol else ""
-            
-            print(f"\n=== Open Orders{symbol_text} ===")
-            open_orders = self.order_handler.get_open_orders(symbol)
-            
-            if open_orders:
-                headers = ["Symbol", "Side", "Size", "Price", "Order ID", "Timestamp"]
-                rows = []
+            """
+            List all open orders, optionally for a specific symbol
+            Usage: orders [symbol]
+            Example: orders ETH
+            """
+            if not self.connected_exchanges[self.active_exchange]:
+                print(f"Not connected to {self.active_exchange}. Use 'connect' or 'connect_bybit' first.")
+                return
                 
-                for order in open_orders:
-                    timestamp = datetime.fromtimestamp(order.get("timestamp", 0) / 1000).strftime("%Y-%m-%d %H:%M:%S")
-                    rows.append([
-                        order.get("coin", ""),
-                        "Buy" if order.get("side", "") == "B" else "Sell",
-                        float(order.get("sz", 0)),
-                        float(order.get("limitPx", 0)),
-                        order.get("oid", 0),
-                        timestamp
-                    ])
+            try:
+                symbol = arg.strip() if arg.strip() else None
+                symbol_text = f" for {symbol}" if symbol else ""
                 
-                self._print_table(headers, rows)
-            else:
-                print("No open orders")
+                print(f"\n=== Open Orders{symbol_text} ({self.active_exchange.capitalize()}) ===")
                 
-        except Exception as e:
-            print(f"\nError fetching open orders: {str(e)}")
+                if self.active_exchange == "hyperliquid":
+                    open_orders = self.order_handler.get_open_orders(symbol)
+                else:  # Bybit
+                    open_orders = self.bybit_connector.get_open_orders(symbol)
+                
+                if open_orders:
+                    headers = ["Symbol", "Side", "Size", "Price", "Order ID", "Timestamp"]
+                    rows = []
+                    
+                    for order in open_orders:
+                        timestamp = datetime.fromtimestamp(order.get("timestamp", 0) / 1000).strftime("%Y-%m-%d %H:%M:%S")
+                        rows.append([
+                            order.get("coin", ""),
+                            "Buy" if order.get("side", "") == "B" else "Sell",
+                            float(order.get("sz", 0)),
+                            float(order.get("limitPx", 0)),
+                            order.get("oid", 0),
+                            timestamp
+                        ])
+                    
+                    self._print_table(headers, rows)
+                else:
+                    print("No open orders")
+                    
+            except Exception as e:
+                print(f"\nError fetching open orders: {str(e)}")
     
     def do_positions(self, arg):
-        """
-        Show current positions
-        Usage: positions
-        """
-        if not self.api_connector.exchange:
-            print("Not connected to exchange. Use 'connect' first.")
-            return
-            
-        try:
-            print("\n=== Current Positions ===")
-            positions = []
-            
-            perp_state = self.api_connector.info.user_state(self.api_connector.wallet_address)
-            for asset_position in perp_state.get("assetPositions", []):
-                position = asset_position.get("position", {})
-                if float(position.get("szi", 0)) != 0:
-                    positions.append({
-                        "symbol": position.get("coin", ""),
-                        "size": float(position.get("szi", 0)),
-                        "entry_price": float(position.get("entryPx", 0)),
-                        "mark_price": float(position.get("markPx", 0)),
-                        "liquidation_price": float(position.get("liquidationPx", 0) or 0),
-                        "unrealized_pnl": float(position.get("unrealizedPnl", 0)),
-                        "margin_used": float(position.get("marginUsed", 0))
-                    })
-            
-            if positions:
-                headers = ["Symbol", "Size", "Entry Price", "Mark Price", "Unrealized PnL", "Margin Used"]
-                rows = []
+            """
+            Show current positions
+            Usage: positions
+            """
+            if not self.connected_exchanges[self.active_exchange]:
+                print(f"Not connected to {self.active_exchange}. Use 'connect' or 'connect_bybit' first.")
+                return
                 
-                for pos in positions:
-                    rows.append([
-                        pos["symbol"],
-                        pos["size"],
-                        pos["entry_price"],
-                        pos["mark_price"],
-                        pos["unrealized_pnl"],
-                        pos["margin_used"]
-                    ])
+            try:
+                print(f"\n=== Current Positions ({self.active_exchange.capitalize()}) ===")
                 
-                self._print_table(headers, rows)
-            else:
-                print("No open positions")
+                if self.active_exchange == "hyperliquid":
+                    positions = []
+                    
+                    perp_state = self.api_connector.info.user_state(self.api_connector.wallet_address)
+                    for asset_position in perp_state.get("assetPositions", []):
+                        position = asset_position.get("position", {})
+                        if float(position.get("szi", 0)) != 0:
+                            positions.append({
+                                "symbol": position.get("coin", ""),
+                                "size": float(position.get("szi", 0)),
+                                "entry_price": float(position.get("entryPx", 0)),
+                                "mark_price": float(position.get("markPx", 0)),
+                                "liquidation_price": float(position.get("liquidationPx", 0) or 0),
+                                "unrealized_pnl": float(position.get("unrealizedPnl", 0)),
+                                "margin_used": float(position.get("marginUsed", 0))
+                            })
+                else:  # Bybit
+                    positions = self.bybit_connector.get_positions()
                 
-        except Exception as e:
-            print(f"\nError fetching positions: {str(e)}")
+                if positions:
+                    headers = ["Symbol", "Size", "Entry Price", "Mark Price", "Unrealized PnL", "Margin Used"]
+                    rows = []
+                    
+                    for pos in positions:
+                        rows.append([
+                            pos["symbol"],
+                            pos["size"],
+                            pos["entry_price"],
+                            pos["mark_price"],
+                            pos["unrealized_pnl"],
+                            pos["margin_used"]
+                        ])
+                    
+                    self._print_table(headers, rows)
+                else:
+                    print("No open positions")
+                    
+            except Exception as e:
+                print(f"\nError fetching positions: {str(e)}")
     
     def do_history(self, arg):
         """
@@ -810,11 +988,11 @@ class ElysiumTerminalUI(cmd.Cmd):
 
     # =====================================Strategy Selector=========================================
 
-    # These methods should be added to the MMMMTerminalUI class in terminal_ui.py
+    # These methods should be added to the MMMMTerminalUI class in terminal_ui.py in order to do the market making
 
     def __init__(self, api_connector, order_handler, config_manager):
         super().__init__()
-        self.prompt = '>>> '
+        self.prompt = '|Market_Making_Mega_Machine-$|->>> '
         self.api_connector = api_connector
         self.order_handler = order_handler
         self.config_manager = config_manager
@@ -1113,3 +1291,19 @@ class ElysiumTerminalUI(cmd.Cmd):
         for strategy in strategies:
             print(f"  - {strategy['name']} ({strategy['module']})")
             print(f"    {strategy['description']}")
+            print("\nFor more details on a specific strategy, refer to its documentation.")
+            print("You can also customize parameters when selecting a strategy.")
+            print("Use 'strategy_params <strategy_name>' to view or modify parameters.")
+            print("\nFor more information, refer to the MMMM documentation.")
+            print("Happy trading!")
+            print("\n========================================")
+            print("End of Help")
+            print("========================================")
+            print("\n")
+            print("Use 'help' to see all available commands.")
+            print("Use 'exit' to exit the terminal.")
+            print("\n")
+            print("========================================")
+            print("End of MMMM Terminal UI")
+            print("========================================")
+            print("\n")

@@ -1,5 +1,6 @@
 .DS_Store
 dontshareconfig.py
+mmmm_config.json
 elysium_config.json
 /__pycache__/
 *.pyc
