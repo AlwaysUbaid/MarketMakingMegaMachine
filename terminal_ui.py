@@ -7,7 +7,6 @@ import json
 import queue
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
-from cross_ex_terminal_commands import CrossExchangeCommands
 
 class ElysiumTerminalUI(cmd.Cmd):
     """Command-line interface for MMMM Trading Platform"""
