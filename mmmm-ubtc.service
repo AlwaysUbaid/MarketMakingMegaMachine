@@ -1,0 +1,19 @@
+[Unit]
+Description=MMMM Trading Bot - UBTC Market Making
+After=network.target
+
+[Service]
+Type=simple
+User=trading
+WorkingDirectory=/home/trading/mmmm
+ExecStart=/usr/bin/python3 /home/trading/mmmm/main.py -s ubtc_mm -v --log-file /home/trading/mmmm/logs/ubtc_mm.log
+Restart=on-failure
+RestartSec=30s
+StandardOutput=append:/home/trading/mmmm/logs/systemd-output.log
+StandardError=append:/home/trading/mmmm/logs/systemd-error.log
+
+# Environment variables (optional)
+Environment="PYTHONPATH=/home/trading/mmmm"
+
+[Install]
+WantedBy=multi-user.target

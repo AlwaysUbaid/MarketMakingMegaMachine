@@ -11,7 +11,7 @@ from typing import Dict, List, Any, Optional, Tuple
 class ElysiumTerminalUI(cmd.Cmd):
     """Command-line interface for MMMM Trading Platform"""
     
-    VERSION = "1.0.0"
+    VERSION = "2.0.0"
     intro = None
 
     ASCII_ART = '''
@@ -30,8 +30,6 @@ class ElysiumTerminalUI(cmd.Cmd):
     Type 'help' to see available commands
 
     Useful Commands:
-    - connect     Connect to exchange
-                "connect mainnet" or "connect testnet"
     - balance     See your exchange balances
     - positions   Show your open positions
 
@@ -70,7 +68,7 @@ class ElysiumTerminalUI(cmd.Cmd):
         self.api_connector = api_connector
         self.order_handler = order_handler
         self.config_manager = config_manager
-        self.authenticated = False
+        self.authenticated = True  # Set to True by default
         self.last_command_output = ""
 
         # Initialize strategy selector
@@ -80,43 +78,7 @@ class ElysiumTerminalUI(cmd.Cmd):
     def preloop(self):
         """Setup before starting the command loop"""
         self.display_layout()
-        
-        # Authenticate user before proceeding
-        auth_success = self.authenticate_user()
-        if not auth_success:
-            print("\nAuthentication failed. Exiting...")
-            import sys
-            sys.exit(1)
-        
-        self.authenticated = True
-        print("\nAuthentication successful!")
-        print("Initializing MMMM CLI...")
-        time.sleep(1)
         print("Ready to trade!\n")
-        
-    def authenticate_user(self) -> bool:
-        """Authenticate user with password"""
-        # Password is already stored in config
-        if self.config_manager.get('password_hash'):
-            for attempt in range(3):  # Allow 3 attempts
-                password = input("Enter your password: ")
-                if self.config_manager.verify_password(password):
-                    return True
-                else:
-                    print(f"Incorrect password. {2-attempt} attempts remaining.")
-            return False
-        else:
-            # First-time setup
-            print("First-time setup. Please create a password:")
-            password = input("Enter new password: ")
-            confirm = input("Confirm password: ")
-            
-            if password == confirm:
-                self.config_manager.set_password(password)
-                return True
-            else:
-                print("Passwords don't match.")
-                return False
     
     def display_layout(self):
         """Display the interface layout"""
