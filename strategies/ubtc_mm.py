@@ -2,11 +2,13 @@ import logging
 import threading
 import math
 import time
+import numpy as np
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List, Any
 
 # Import the base strategy class
 from strategy_selector import TradingStrategy
+from volatility_spread_enhancement import VolatilitySpreadManager
 
 class UbtcMarketMaking(TradingStrategy):
     """
@@ -61,6 +63,16 @@ class UbtcMarketMaking(TradingStrategy):
             "value": 0.01,  # 1% default
             "type": "float", 
             "description": "Maximum distance from current price to keep orders active"
+        },
+        "use_dynamic_spreads": {
+            "value": True,
+            "type": "bool",
+            "description": "Whether to adjust spreads dynamically based on volatility"
+        },
+        "volatility_window": {
+            "value": 300,  # 5 minutes
+            "type": "int",
+            "description": "Time window (in seconds) for volatility calculation"
         },
     }
     
@@ -227,6 +239,7 @@ class UbtcMarketMaking(TradingStrategy):
         Returns:
             Tuple of (success, order_id)
         """
+        self._update_dynamic_spreads(market_data)
         try:
             tick_size = self._get_tick_size(market_data)
             best_bid = market_data.get("best_bid", 0)
@@ -284,6 +297,7 @@ class UbtcMarketMaking(TradingStrategy):
         Returns:
             Tuple of (success, order_id)
         """
+        self._update_dynamic_spreads(market_data)
         try:
             tick_size = self._get_tick_size(market_data)
             best_bid = market_data.get("best_bid", 0)
@@ -643,6 +657,58 @@ class UbtcMarketMaking(TradingStrategy):
             self._cancel_active_orders()
             self.running = False
             self.set_status("Market making strategy stopped")
+    def _update_dynamic_spreads(self, market_data):
+        """Update spreads based on current market conditions"""
+        if not self.use_dynamic_spreads:
+            return
+            
+        current_time = time.time()
+        
+        # Extract market data
+        mid_price = market_data.get("mid_price", 0)
+        if not mid_price and "best_bid" in market_data and "best_ask" in market_data:
+            mid_price = (market_data["best_bid"] + market_data["best_ask"]) / 2
+            
+        # Get order book data if available
+        bid_size = ask_size = volume = None
+        if "order_book" in market_data:
+            ob = market_data["order_book"]
+            # Extract top-level bid/ask sizes
+            if "levels" in ob and len(ob["levels"]) >= 2:
+                if ob["levels"][0]:  # bids
+                    bid_size = sum(float(level.get("sz", 0)) for level in ob["levels"][0][:5])
+                if ob["levels"][1]:  # asks  
+                    ask_size = sum(float(level.get("sz", 0)) for level in ob["levels"][1][:5])
+        
+        # Update spread manager
+        self.spread_manager.update_market_data(
+            mid_price=mid_price,
+            bid_price=market_data.get("best_bid"),
+            ask_price=market_data.get("best_ask"),
+            volume=volume,
+            bid_size=bid_size,
+            ask_size=ask_size
+        )
+        
+        # Get new dynamic spreads
+        new_bid_spread, new_ask_spread = self.spread_manager.get_dynamic_spreads(
+            current_spread_bid=self.bid_spread,
+            current_spread_ask=self.ask_spread
+        )
+        
+        # Update strategy spreads
+        old_bid_spread = self.bid_spread
+        old_ask_spread = self.ask_spread
+        
+        self.bid_spread = new_bid_spread
+        self.ask_spread = new_ask_spread
+        self.last_spread_update = current_time
+        
+        # Log significant changes
+        if abs(new_bid_spread - old_bid_spread) / old_bid_spread > 0.2:
+            self.logger.info(f"Bid spread adjusted: {old_bid_spread:.6f} -> {new_bid_spread:.6f}")
+        if abs(new_ask_spread - old_ask_spread) / old_ask_spread > 0.2:
+            self.logger.info(f"Ask spread adjusted: {old_ask_spread:.6f} -> {new_ask_spread:.6f}")
 
     def _cancel_active_orders(self):
         """Cancel all active orders for this strategy"""
@@ -765,43 +831,58 @@ class UbtcMarketMaking(TradingStrategy):
         # Format with appropriate precision
         return round(rounded_price, decimal_places)
     
-    def get_performance_metrics(self):
-        """
-        Get performance metrics for the strategy
+def get_performance_metrics(self):
+    """
+    Get performance metrics for the strategy
+    
+    Returns:
+        dict: Performance metrics
+    """
+    try:
+        asset_balance, quote_balance = self.get_balances()
+
+        # Calculate order ages
+        current_time = time.time()
+        buy_order_age = (current_time - self.active_buy_order_time) if self.active_buy_order_time else 0
+        sell_order_age = (current_time - self.active_sell_order_time) if self.active_sell_order_time else 0
+
+        metrics = {
+            "symbol": self.symbol,
+            "mid_price": self.mid_price,
+            "has_buy_order": self.active_buy_order_id is not None,
+            "has_sell_order": self.active_sell_order_id is not None,
+            "buy_order_age": f"{buy_order_age:.1f}s" if buy_order_age > 0 else "N/A",
+            "sell_order_age": f"{sell_order_age:.1f}s" if sell_order_age > 0 else "N/A",
+            "order_max_age": f"{self.order_max_age}s",
+            "price_deviation_threshold": f"{self.price_deviation_threshold:.2%}",
+            "max_order_distance": f"{self.max_order_distance:.2%}",
+            "asset_balance": asset_balance,
+            "quote_balance": quote_balance,
+            "order_size": self.order_amount,
+            "errors": self.error_count,
+            "last_update": datetime.fromtimestamp(self.last_tick_time).strftime("%Y-%m-%d %H:%M:%S") if self.last_tick_time else "Never"
+        }
         
-        Returns:
-            dict: Performance metrics
-        """
-        try:
-            asset_balance, quote_balance = self.get_balances()
-
-            # Calculate order ages
-            current_time = time.time()
-            buy_order_age = (current_time - self.active_buy_order_time) if self.active_buy_order_time else 0
-            sell_order_age = (current_time - self.active_sell_order_time) if self.active_sell_order_time else 0
-
-            metrics = {
-                "symbol": self.symbol,
-                "mid_price": self.mid_price,
-                "has_buy_order": self.active_buy_order_id is not None,
-                "has_sell_order": self.active_sell_order_id is not None,
-                "buy_order_age": f"{buy_order_age:.1f}s" if buy_order_age > 0 else "N/A",
-                "sell_order_age": f"{sell_order_age:.1f}s" if sell_order_age > 0 else "N/A",
-                "order_max_age": f"{self.order_max_age}s",
-                "price_deviation_threshold": f"{self.price_deviation_threshold:.2%}",
-                "max_order_distance": f"{self.max_order_distance:.2%}",
-                "asset_balance": asset_balance,
-                "quote_balance": quote_balance,
-                "order_size": self.order_amount,
-                "errors": self.error_count,
-                "last_update": datetime.fromtimestamp(self.last_tick_time).strftime("%Y-%m-%d %H:%M:%S") if self.last_tick_time else "Never"
-            }
-            
-            return metrics
-            
-        except Exception as e:
-            self.logger.error(f"Error calculating metrics: {str(e)}")
-            return {
-                "symbol": self.symbol,
-                "error": str(e)
-            }
+        # Add volatility diagnostics if available
+        if hasattr(self, 'spread_manager') and hasattr(self, 'use_dynamic_spreads') and self.use_dynamic_spreads:
+            vol_diagnostics = self.spread_manager.get_diagnostics()
+            metrics.update({
+                "dynamic_spreads": "Enabled",
+                "original_bid_spread": f"{self.original_bid_spread:.6f}",
+                "original_ask_spread": f"{self.original_ask_spread:.6f}",
+                "current_bid_spread": f"{self.bid_spread:.6f}",
+                "current_ask_spread": f"{self.ask_spread:.6f}",
+                "volatility": vol_diagnostics.get("current_volatility", "N/A"),
+                "volatility_percentile": vol_diagnostics.get("volatility_percentile", "N/A"),
+                "vol_multiplier": vol_diagnostics.get("volatility_multiplier", "N/A"),
+                "order_book_imbalance": f"{vol_diagnostics.get('imbalance_bid_adjustment', 1.0):.2f}/{vol_diagnostics.get('imbalance_ask_adjustment', 1.0):.2f}"
+            })
+        
+        return metrics
+        
+    except Exception as e:
+        self.logger.error(f"Error calculating metrics: {str(e)}")
+        return {
+            "symbol": self.symbol,
+            "error": str(e)
+        }
