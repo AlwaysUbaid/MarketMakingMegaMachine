@@ -91,6 +91,24 @@ class UbtcMarketMaking(TradingStrategy):
         self.max_order_distance = self._get_param_value("max_order_distance")
         self.is_perp = self._get_param_value("is_perp")
         self.leverage = self._get_param_value("leverage")
+
+        # Dynamic spread parameters
+        self.use_dynamic_spreads = self._get_param_value("use_dynamic_spreads")
+        self.volatility_window = self._get_param_value("volatility_window")
+
+        # Store original spreads for reference
+        self.original_bid_spread = self.bid_spread
+        self.original_ask_spread = self.ask_spread
+        
+        # Initialize volatility spread manager if enabled
+        if self.use_dynamic_spreads:
+            self.spread_manager = VolatilitySpreadManager(
+                base_bid_spread=self.bid_spread,
+                base_ask_spread=self.ask_spread,
+                volatility_window=self.volatility_window,
+                price_window=200
+            )
+            self.logger.info("Dynamic spreads enabled with volatility-based adjustments")
         
         # Runtime variables
         self.last_tick_time = 0

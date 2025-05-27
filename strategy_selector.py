@@ -4,6 +4,34 @@ import inspect
 import logging
 import time
 from typing import Dict, List, Any, Optional, Callable, Type
+import traceback
+import sys
+
+# Specific imports for strategy classes
+try:
+    from strategies.ubtc_mm import UbtcMarketMaking
+except ImportError:
+    pass  
+
+try:
+    from strategies.ueth_mm import UethMarketMaking
+except ImportError:
+    pass
+
+try:
+    from strategies.ufart_mm import UfartMarketMaking
+except ImportError:
+    pass
+
+try:
+    from strategies.usol_mm import UsolMarketMaking
+except ImportError:
+    pass
+
+try:
+    from strategies.pure_mm import PureMarketMaking
+except ImportError:
+    pass
 
 # Strategy base class that all strategies should inherit from
 class TradingStrategy:
@@ -106,9 +134,13 @@ class StrategySelector:
         self.strategies = {}
         
         # Add the strategy directory to sys.path if it's not already there
-        import sys
         if self.strategy_dir not in sys.path:
             sys.path.append(self.strategy_dir)
+            
+        # Add parent directory to sys.path to allow importing strategies as modules
+        parent_dir = os.path.dirname(os.path.abspath(__file__))
+        if parent_dir not in sys.path:
+            sys.path.append(parent_dir)
         
         # Look for Python files in the strategy directory
         for filename in os.listdir(self.strategy_dir):
@@ -116,11 +148,15 @@ class StrategySelector:
                 module_name = filename[:-3]  # Remove .py extension
                 
                 try:
-                    # Import the module dynamically
-                    module = importlib.import_module(module_name)
+                    # Try importing as a module within the strategies package
+                    try:
+                        module = importlib.import_module(f"strategies.{module_name}")
+                    except ImportError:
+                        # Fall back to direct import
+                        module = importlib.import_module(module_name)
                     
                     # Find strategy classes in the module
-                    for _, obj in inspect.getmembers(module):
+                    for name, obj in inspect.getmembers(module):
                         if (inspect.isclass(obj) and 
                             issubclass(obj, TradingStrategy) and 
                             obj != TradingStrategy):
@@ -131,6 +167,22 @@ class StrategySelector:
                 
                 except Exception as e:
                     self.logger.error(f"Error loading strategy module {module_name}: {str(e)}")
+                    self.logger.debug(traceback.format_exc())  # More detailed error
+        
+        # Manual addition of known strategies
+        # This ensures strategies are available even if dynamic discovery fails
+        known_strategies = {
+            'ubtc_mm': UbtcMarketMaking if 'UbtcMarketMaking' in globals() else None,
+            'ueth_mm': UethMarketMaking if 'UethMarketMaking' in globals() else None,
+            'ufart_mm': UfartMarketMaking if 'UfartMarketMaking' in globals() else None, 
+            'usol_mm': UsolMarketMaking if 'UsolMarketMaking' in globals() else None,
+            'pure_mm': PureMarketMaking if 'PureMarketMaking' in globals() else None
+        }
+        
+        for module_name, strategy_class in known_strategies.items():
+            if strategy_class and module_name not in self.strategies:
+                self.strategies[module_name] = strategy_class
+                self.logger.info(f"Manually added strategy: {strategy_class.STRATEGY_NAME} from {module_name}")
         
         self.logger.info(f"Discovered {len(self.strategies)} trading strategies")
     
@@ -181,6 +233,39 @@ class StrategySelector:
         if self.active_strategy:
             self.stop_strategy()
         
+        # DIRECT FIX: If module_name is any of our known strategies, directly import if needed
+        if module_name == 'ubtc_mm' and module_name not in self.strategies:
+            try:
+                from strategies.ubtc_mm import UbtcMarketMaking
+                self.strategies[module_name] = UbtcMarketMaking
+            except ImportError as e:
+                self.logger.error(f"Error importing UbtcMarketMaking: {str(e)}")
+        elif module_name == 'ueth_mm' and module_name not in self.strategies:
+            try:
+                from strategies.ueth_mm import UethMarketMaking
+                self.strategies[module_name] = UethMarketMaking
+            except ImportError as e:
+                self.logger.error(f"Error importing UethMarketMaking: {str(e)}")
+        elif module_name == 'ufart_mm' and module_name not in self.strategies:
+            try:
+                from strategies.ufart_mm import UfartMarketMaking
+                self.strategies[module_name] = UfartMarketMaking
+            except ImportError as e:
+                self.logger.error(f"Error importing UfartMarketMaking: {str(e)}")
+        elif module_name == 'usol_mm' and module_name not in self.strategies:
+            try:
+                from strategies.usol_mm import UsolMarketMaking
+                self.strategies[module_name] = UsolMarketMaking
+            except ImportError as e:
+                self.logger.error(f"Error importing UsolMarketMaking: {str(e)}")
+        elif module_name == 'pure_mm' and module_name not in self.strategies:
+            try:
+                from strategies.pure_mm import PureMarketMaking
+                self.strategies[module_name] = PureMarketMaking
+            except ImportError as e:
+                self.logger.error(f"Error importing PureMarketMaking: {str(e)}")
+                
+        # Check if strategy exists after potential direct imports
         if module_name not in self.strategies:
             self.logger.error(f"Strategy {module_name} not found")
             return False
@@ -227,7 +312,6 @@ class StrategySelector:
             return True
             
         except Exception as e:
-            import traceback
             self.logger.error(f"Error starting strategy {module_name}: {str(e)}")
             self.logger.error(traceback.format_exc())
             return False
@@ -275,4 +359,4 @@ class StrategySelector:
             "name": strategy.STRATEGY_NAME,
             "running": strategy.is_running(),
             "params": self.active_strategy["params"]
-        } 
+        }

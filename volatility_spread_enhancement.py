@@ -267,118 +267,19 @@ class VolatilitySpreadManager:
             "volatility_samples": len(self.volatility_history)
         }
 
-
-# Integration example for your existing strategy
-class EnhancedUbtcMarketMaking(UbtcMarketMaking):
-    """
-    Enhanced market making strategy with dynamic volatility-based spreads
-    """
-    
-    def __init__(self, api_connector, order_handler, config_manager, params=None):
-        super().__init__(api_connector, order_handler, config_manager, params)
-        
-        # Initialize volatility spread manager
-        self.spread_manager = VolatilitySpreadManager(
-            base_bid_spread=self.bid_spread,
-            base_ask_spread=self.ask_spread,
-            volatility_window=300,  # 5 minutes
-            price_window=200
-        )
-        
-        # Override static spreads with dynamic calculation
-        self.use_dynamic_spreads = True
-        
-    def _update_dynamic_spreads(self, market_data):
-        """Update spreads based on current market conditions"""
-        if not self.use_dynamic_spreads:
-            return
-            
-        # Extract market data
-        mid_price = market_data.get("mid_price", 0)
-        if not mid_price and "best_bid" in market_data and "best_ask" in market_data:
-            mid_price = (market_data["best_bid"] + market_data["best_ask"]) / 2
-            
-        # Get order book data if available
-        bid_size = ask_size = volume = None
-        if "order_book" in market_data:
-            ob = market_data["order_book"]
-            # Extract top-level bid/ask sizes
-            if "levels" in ob and len(ob["levels"]) >= 2:
-                if ob["levels"][0]:  # bids
-                    bid_size = sum(float(level.get("sz", 0)) for level in ob["levels"][0][:5])
-                if ob["levels"][1]:  # asks  
-                    ask_size = sum(float(level.get("sz", 0)) for level in ob["levels"][1][:5])
-        
-        # Update spread manager
-        self.spread_manager.update_market_data(
-            mid_price=mid_price,
-            bid_price=market_data.get("best_bid"),
-            ask_price=market_data.get("best_ask"),
-            volume=volume,
-            bid_size=bid_size,
-            ask_size=ask_size
-        )
-        
-        # Get new dynamic spreads
-        new_bid_spread, new_ask_spread = self.spread_manager.get_dynamic_spreads(
-            current_spread_bid=self.bid_spread,
-            current_spread_ask=self.ask_spread
-        )
-        
-        # Update strategy spreads
-        old_bid_spread = self.bid_spread
-        old_ask_spread = self.ask_spread
-        
-        self.bid_spread = new_bid_spread
-        self.ask_spread = new_ask_spread
-        
-        # Log significant changes
-        if abs(new_bid_spread - old_bid_spread) / old_bid_spread > 0.2:
-            self.logger.info(f"Bid spread adjusted: {old_bid_spread:.6f} -> {new_bid_spread:.6f}")
-        if abs(new_ask_spread - old_ask_spread) / old_ask_spread > 0.2:
-            self.logger.info(f"Ask spread adjusted: {old_ask_spread:.6f} -> {new_ask_spread:.6f}")
-    
-    def _run_strategy(self):
-        """Enhanced strategy loop with dynamic spread updates"""
-        # Call parent initialization
-        super()._run_strategy()
-        
-        # The dynamic spread updates will happen in the main loop
-        # by calling _update_dynamic_spreads() before order placement
-        
-    def get_performance_metrics(self):
-        """Enhanced metrics including volatility information"""
-        base_metrics = super().get_performance_metrics()
-        
-        # Add volatility diagnostics
-        if hasattr(self, 'spread_manager'):
-            vol_diagnostics = self.spread_manager.get_diagnostics()
-            base_metrics.update({
-                "dynamic_spreads": self.use_dynamic_spreads,
-                "current_bid_spread": f"{self.bid_spread:.6f}",
-                "current_ask_spread": f"{self.ask_spread:.6f}",
-                **vol_diagnostics
-            })
-        
-        return base_metrics
-
-
-# Example usage and configuration
+# Example usage of the volatility spread manager
 if __name__ == "__main__":
-    # Example of how to configure dynamic spreads
-    dynamic_params = {
-        "symbol": {"value": "UBTC/USDC", "type": "str"},
-        "bid_spread": {"value": 0.0001, "type": "float"},  # Base spread  
-        "ask_spread": {"value": 0.0001, "type": "float"},  # Base spread
-        "order_amount": {"value": 0.001, "type": "float"},
-        "refresh_time": {"value": 5, "type": "int"},  # More frequent updates
-        "use_dynamic_spreads": {"value": True, "type": "bool"}
-    }
-    
-    print("Dynamic spread configuration ready!")
-    print("Key improvements:")
+    # This section runs only when this file is executed directly
+    print("Volatility Spread Manager - Dynamic Spread Calculator")
+    print("\nKey features:")
     print("1. Volatility-based spread adjustment")  
     print("2. Volume-based refinements")
     print("3. Order book imbalance considerations")
     print("4. Gradual spread transitions")
     print("5. Enhanced diagnostics and monitoring")
+    
+    # Usage example - this doesn't run, just shows how to use the class
+    print("\nUsage example:")
+    print("manager = VolatilitySpreadManager(base_bid_spread=0.001, base_ask_spread=0.001)")
+    print("manager.update_market_data(mid_price=30000, bid_price=29980, ask_price=30020)")
+    print("new_bid_spread, new_ask_spread = manager.get_dynamic_spreads()")
