@@ -51,19 +51,15 @@ def auto_connect(api_connector, use_testnet=False):
     logger = logging.getLogger("mmmm")
     
     try:
-        # Import credentials from dontshareconfig.py
-        import dontshareconfig as ds
+        # Get credentials from environment variables
+        wallet_address = os.getenv('WALLET_ADDRESS')
+        secret_key = os.getenv('WALLET_SECRET')
         
-        # Select the appropriate credentials based on network
-        if use_testnet:
-            wallet_address = ds.testnet_wallet
-            secret_key = ds.testnet_secret
-            network_name = "testnet"
-        else:
-            wallet_address = ds.mainnet_wallet
-            secret_key = ds.mainnet_secret
-            network_name = "mainnet"
+        if not wallet_address or not secret_key:
+            logger.error("Wallet credentials not found in environment variables")
+            return False
         
+        network_name = "testnet" if use_testnet else "mainnet"
         logger.info(f"Auto-connecting to Hyperliquid ({network_name})...")
         success = api_connector.connect_hyperliquid(wallet_address, secret_key, use_testnet)
         

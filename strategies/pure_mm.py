@@ -23,22 +23,22 @@ class PureMarketMaking(TradingStrategy):
     # Default parameters with descriptions
     STRATEGY_PARAMS = {
         "symbol": {
-            "value": "UBTC/USDC",
+            "value": "PURE/USDC",
             "type": "str",
             "description": "Trading pair symbol"
         },
         "bid_spread": {
-            "value": 0.00011,  # 0.1%
+            "value": 0.0001,  # 0.1%
             "type": "float",
             "description": "Spread below mid price for buy orders (as a decimal)"
         },
         "ask_spread": {
-            "value": 0.00012,  # 0.1%
+            "value": 0.0002,  # 0.1%
             "type": "float",
             "description": "Spread above mid price for sell orders (as a decimal)"
         },
         "order_amount": {
-            "value": 0.00013,
+            "value": 0.005,
             "type": "float",
             "description": "Size of each order"
         },
@@ -51,6 +51,16 @@ class PureMarketMaking(TradingStrategy):
             "value": 30,  # 30 seconds default
             "type": "int",
             "description": "Maximum time in seconds before unfilled orders are cancelled and replaced"
+        },
+        "price_deviation_threshold": {
+            "value": 0.005,  # 0.5% default
+            "type": "float",
+            "description": "Cancel orders when price deviates by this percentage"
+        },
+        "max_order_distance": {
+            "value": 0.01,  # 1% default
+            "type": "float", 
+            "description": "Maximum distance from current price to keep orders active"
         },
         "is_perp": {
             "value": False,
@@ -75,6 +85,8 @@ class PureMarketMaking(TradingStrategy):
         self.order_amount = self._get_param_value("order_amount")
         self.refresh_time = self._get_param_value("refresh_time")
         self.order_max_age = self._get_param_value("order_max_age")
+        self.price_deviation_threshold = self._get_param_value("price_deviation_threshold")
+        self.max_order_distance = self._get_param_value("max_order_distance")
         self.is_perp = self._get_param_value("is_perp")
         self.leverage = self._get_param_value("leverage")
         
@@ -85,6 +97,8 @@ class PureMarketMaking(TradingStrategy):
         self.active_sell_order_id = None
         self.active_buy_order_time = None  
         self.active_sell_order_time = None  
+        self.active_buy_order_price = None  # Store the actual order price
+        self.active_sell_order_price = None  # Store the actual order price
         self.status_message = "Initialized"
         self.status_lock = threading.Lock()
         self.prev_mid_price = None
@@ -92,6 +106,10 @@ class PureMarketMaking(TradingStrategy):
         self.error_count = 0
         self.consecutive_errors = 0
         self.last_successful_placement = 0
+        self.last_cancel_all_time = 0  # Track when we last cancelled all orders
+        self.strategy_start_time = 0  # When the strategy started
+        self.emergency_sell_done = False  # Flag to track if emergency sell was done
+        self.auto_cancel_stop_event = threading.Event()  # For stopping the auto-cancel thread
         
         # Extract asset name from symbol for balance lookup
         self.asset = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
@@ -258,6 +276,7 @@ class PureMarketMaking(TradingStrategy):
             if success:
                 self.active_buy_order_id = order_id
                 self.active_buy_order_time = time.time()
+                self.active_buy_order_price = bid_price
                 self.logger.info(f"Successfully placed buy order ID {order_id} at {bid_price}")
                 return True, order_id
             else:
@@ -318,6 +337,7 @@ class PureMarketMaking(TradingStrategy):
             if success:
                 self.active_sell_order_id = order_id
                 self.active_sell_order_time = time.time()
+                self.active_sell_order_price = ask_price
                 self.logger.info(f"Successfully placed sell order ID {order_id} at {ask_price}")
                 return True, order_id
             else:
@@ -367,6 +387,142 @@ class PureMarketMaking(TradingStrategy):
             self.logger.error(f"Error checking order status: {str(e)}")
             return False, False
     
+    def _check_and_cancel_orders(self, market_data):
+        """Check if orders need to be cancelled based on age or price deviation"""
+        current_time = time.time()
+        need_cancel_buy = False
+        need_cancel_sell = False
+        
+        # Get current market midpoint
+        if "mid_price" in market_data:
+            current_mid_price = market_data["mid_price"]
+        elif "best_bid" in market_data and "best_ask" in market_data:
+            current_mid_price = (market_data["best_bid"] + market_data["best_ask"]) / 2
+        else:
+            self.logger.warning("Cannot check price deviation: no price data available")
+            return False, False
+        
+        # Check buy order for cancellation
+        if self.active_buy_order_id and self.active_buy_order_time:
+            cancel_buy_reason = None
+            
+            # 1. Check age-based cancellation
+            order_age = current_time - self.active_buy_order_time
+            if order_age > self.order_max_age:
+                cancel_buy_reason = f"exceeded max age of {self.order_max_age}s (current age: {order_age:.1f}s)"
+            
+            # 2. Check price deviation-based cancellation (if we know the order price)
+            elif self.active_buy_order_price:
+                # Calculate current ideal buy price
+                current_buy_price = current_mid_price * (1 - self.bid_spread)
+                
+                # Calculate price deviation percentage
+                deviation = abs(current_buy_price - self.active_buy_order_price) / self.active_buy_order_price
+                
+                # Cancel if deviation exceeds threshold
+                if deviation > self.price_deviation_threshold:
+                    cancel_buy_reason = f"price deviation {deviation:.2%} exceeds threshold {self.price_deviation_threshold:.2%}"
+                
+                # 3. Check distance from current price (optional)
+                elif self.active_buy_order_price < current_mid_price * (1 - self.max_order_distance):
+                    cancel_buy_reason = f"order price {self.active_buy_order_price} too far below current mid price {current_mid_price}"
+            
+            # Execute cancellation if needed
+            if cancel_buy_reason:
+                self.logger.info(f"Cancelling buy order {self.active_buy_order_id}: {cancel_buy_reason}")
+                try:
+                    result = self.order_handler.cancel_order(self.symbol, self.active_buy_order_id)
+                    if result and result.get("status") == "ok":
+                        self.logger.info(f"Buy order {self.active_buy_order_id} cancelled successfully")
+                    else:
+                        self.logger.warning(f"Failed to cancel buy order {self.active_buy_order_id}: {result}")
+                except Exception as e:
+                    self.logger.error(f"Error cancelling buy order {self.active_buy_order_id}: {str(e)}")
+                finally:
+                    # Clear order tracking
+                    self.active_buy_order_id = None
+                    self.active_buy_order_time = None
+                    self.active_buy_order_price = None
+                    need_cancel_buy = True
+        
+        # Check sell order for cancellation (similar logic)
+        if self.active_sell_order_id and self.active_sell_order_time:
+            cancel_sell_reason = None
+            
+            # 1. Check age-based cancellation
+            order_age = current_time - self.active_sell_order_time
+            if order_age > self.order_max_age:
+                cancel_sell_reason = f"exceeded max age of {self.order_max_age}s (current age: {order_age:.1f}s)"
+            
+            # 2. Check price deviation-based cancellation (if we know the order price)
+            elif self.active_sell_order_price:
+                # Calculate current ideal sell price
+                current_sell_price = current_mid_price * (1 + self.ask_spread)
+                
+                # Calculate price deviation percentage
+                deviation = abs(current_sell_price - self.active_sell_order_price) / self.active_sell_order_price
+                
+                # Cancel if deviation exceeds threshold
+                if deviation > self.price_deviation_threshold:
+                    cancel_sell_reason = f"price deviation {deviation:.2%} exceeds threshold {self.price_deviation_threshold:.2%}"
+                
+                # 3. Check distance from current price (optional)
+                elif self.active_sell_order_price > current_mid_price * (1 + self.max_order_distance):
+                    cancel_sell_reason = f"order price {self.active_sell_order_price} too far above current mid price {current_mid_price}"
+            
+            # Execute cancellation if needed
+            if cancel_sell_reason:
+                self.logger.info(f"Cancelling sell order {self.active_sell_order_id}: {cancel_sell_reason}")
+                try:
+                    result = self.order_handler.cancel_order(self.symbol, self.active_sell_order_id)
+                    if result and result.get("status") == "ok":
+                        self.logger.info(f"Sell order {self.active_sell_order_id} cancelled successfully")
+                    else:
+                        self.logger.warning(f"Failed to cancel sell order {self.active_sell_order_id}: {result}")
+                except Exception as e:
+                    self.logger.error(f"Error cancelling sell order {self.active_sell_order_id}: {str(e)}")
+                finally:
+                    # Clear order tracking
+                    self.active_sell_order_id = None
+                    self.active_sell_order_time = None
+                    self.active_sell_order_price = None
+                    need_cancel_sell = True
+        
+        return need_cancel_buy, need_cancel_sell
+
+    def _auto_cancel_routine(self):
+        """Background routine for auto-cancellation checks"""
+        while not self.auto_cancel_stop_event.is_set():
+            try:
+                current_time = time.time()
+                
+                # SIMPLE SAFETY 1: Run cancel_all every 2 minutes, no conditions
+                if current_time - self.last_cancel_all_time > 120:  # 120 seconds = 2 minutes
+                    self.logger.info("Running scheduled cancel_all (2-minute interval)")
+                    self.order_handler.cancel_all_orders(self.symbol)
+                    self.last_cancel_all_time = current_time
+                
+                # SIMPLE SAFETY 2: Check for tokens after 5 minutes, if any, sell them
+                if not self.emergency_sell_done and current_time - self.strategy_start_time > 300:  # 5 minutes
+                    asset_balance, _ = self.get_balances()
+                    if asset_balance > 0.00001:  # We still have tokens
+                        self.logger.warning(f"Found {asset_balance} {self.asset} after 5 minutes, emergency market sell")
+                        # Cancel any orders first
+                        self.order_handler.cancel_all_orders(self.symbol)
+                        # Sell everything at market
+                        if self.is_perp:
+                            self.order_handler.perp_market_sell(self.symbol, asset_balance, 1, 0.01)
+                        else:
+                            self.order_handler.market_sell(self.symbol, asset_balance, 0.01)
+                    self.emergency_sell_done = True
+                
+                # Sleep for a short time to avoid excessive CPU usage
+                time.sleep(1)
+                
+            except Exception as e:
+                self.logger.error(f"Error in auto-cancel routine: {str(e)}")
+                time.sleep(5)  # Sleep longer on error
+
     def _run_strategy(self):
         """Main strategy execution loop"""
         self.set_status("Starting market making strategy")
@@ -394,6 +550,13 @@ class PureMarketMaking(TradingStrategy):
         self.running = True
         backoff_time = 0
         last_order_check = 0
+        self.strategy_start_time = time.time()  # Record when we started
+        self.last_cancel_all_time = time.time()  # Initialize last cancel time
+        
+        # Start auto-cancel thread
+        self.auto_cancel_stop_event.clear()
+        auto_cancel_thread = threading.Thread(target=self._auto_cancel_routine, daemon=True)
+        auto_cancel_thread.start()
         
         # Main strategy loop
         try:
@@ -404,56 +567,17 @@ class PureMarketMaking(TradingStrategy):
                 if backoff_time > current_time:
                     time.sleep(0.1)
                     continue
-
-                # Check if orders need to be cancelled due to age
-                need_cancel_buy = False
-                need_cancel_sell = False
                 
-                # Check buy order age
-                if self.active_buy_order_id and self.active_buy_order_time and \
-                (current_time - self.active_buy_order_time) > self.order_max_age:
-                    self.logger.info(f"Buy order {self.active_buy_order_id} exceeded max age of {self.order_max_age}s, cancelling")
-                    self.order_handler.cancel_order(self.symbol, self.active_buy_order_id)
-                    self.active_buy_order_id = None
-                    self.active_buy_order_time = None
-                    need_cancel_buy = True
+                # Get market data for cancellation check
+                market_data = self.api_connector.get_market_data(self.symbol)
+                if "error" in market_data:
+                    self.set_status(f"Error getting market data: {market_data['error']}")
+                    time.sleep(1)
+                    continue
                 
-                # Check sell order age
-                if self.active_sell_order_id and self.active_sell_order_time and \
-                (current_time - self.active_sell_order_time) > self.order_max_age:
-                    self.logger.info(f"Sell order {self.active_sell_order_id} exceeded max age of {self.order_max_age}s, cancelling")
-                    self.order_handler.cancel_order(self.symbol, self.active_sell_order_id)
-                    self.active_sell_order_id = None
-                    self.active_sell_order_time = None
-                    need_cancel_sell = True
+                # Use the enhanced cancellation check
+                need_cancel_buy, need_cancel_sell = self._check_and_cancel_orders(market_data)
                 
-                # If we cancelled any orders, we need fresh market data to place new ones
-                if need_cancel_buy or need_cancel_sell:
-                    # Get fresh market data
-                    market_data = self.api_connector.get_market_data(self.symbol)
-                    if "error" in market_data:
-                        self.set_status(f"Error getting market data after cancel: {market_data['error']}")
-                        time.sleep(1)
-                    else:
-                        # Update mid price
-                        if "mid_price" in market_data:
-                            self.mid_price = market_data["mid_price"]
-                        elif "best_bid" in market_data and "best_ask" in market_data:
-                            best_bid = market_data["best_bid"]
-                            best_ask = market_data["best_ask"]
-                            self.mid_price = (best_bid + best_ask) / 2
-                        
-                        # Get latest balances
-                        asset_balance, quote_balance = self.get_balances()
-                        
-                        # Place new orders if needed
-                        if need_cancel_buy and quote_balance > 1.0:
-                            self._place_buy_order(market_data)
-                            
-                        if need_cancel_sell and asset_balance > 0.00001:
-                            self._place_sell_order(market_data, asset_balance)
-                # END of new auto-cancel block
-
                 # Check if it's time to refresh
                 refresh_needed = (current_time - self.last_tick_time) >= self.refresh_time
                 should_check_orders = (current_time - last_order_check) >= 1  # Check order status frequently
@@ -524,6 +648,11 @@ class PureMarketMaking(TradingStrategy):
             self.set_status(f"Error: {str(e)}")
         
         finally:
+            # Stop auto-cancel thread
+            self.auto_cancel_stop_event.set()
+            if auto_cancel_thread.is_alive():
+                auto_cancel_thread.join(timeout=5)
+            
             # Clean up when stopping
             self._cancel_active_orders()
             self.running = False
