@@ -367,7 +367,7 @@ class UfartMarketMaking(TradingStrategy):
         
         try:
             # Get current open orders
-            open_orders = self.order_handler.get_open_orders(self.symbol)
+            open_orders = self.order_handler.get_open_orders()
             
             # Check buy order status
             if self.active_buy_order_id:
@@ -434,7 +434,10 @@ class UfartMarketMaking(TradingStrategy):
                 # Check if it's time to cancel all orders based on the timer
                 if (current_time - self.last_cancel_time) > self.order_max_age:
                     self.logger.info(f"[Instance {self.instance_id}] Cancelling all orders after {self.order_max_age}s timeout")
-                    self.order_handler.cancel_all_orders(self.symbol)
+                    # Before calling cancel_all_orders, log open orders
+                    open_orders = self.order_handler.get_open_orders()
+                    self.logger.info(f"[Instance {self.instance_id}] Open orders before cancel: {open_orders}")
+                    self.order_handler.cancel_all_orders()
                     self.active_buy_order_id = None
                     self.active_sell_order_id = None
                     self.active_buy_order_time = None
@@ -712,7 +715,7 @@ class UfartMarketMaking(TradingStrategy):
     def _trigger_auto_cancel_all(self):
         if not self.auto_cancel_active:
             self.logger.warning(f"[Instance {self.instance_id}] Triggering auto-cancel-all routine due to insufficient spot balance error.")
-            self.order_handler.cancel_all_orders(self.symbol)
+            self.order_handler.cancel_all_orders()
             self.auto_cancel_active = True
             self.auto_cancel_thread = threading.Thread(target=self._auto_cancel_all_loop, daemon=True)
             self.auto_cancel_thread.start()
@@ -720,7 +723,7 @@ class UfartMarketMaking(TradingStrategy):
     def _auto_cancel_all_loop(self):
         while self.auto_cancel_active and self.running:
             self.logger.info(f"[Instance {self.instance_id}] [AutoCancel] Cancelling all orders every {self.auto_cancel_interval}s due to insufficient spot balance error.")
-            self.order_handler.cancel_all_orders(self.symbol)
+            self.order_handler.cancel_all_orders()
             for _ in range(self.auto_cancel_interval * 10):
                 if not self.auto_cancel_active or not self.running:
                     break

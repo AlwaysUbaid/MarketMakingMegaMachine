@@ -714,15 +714,17 @@ class OrderHandler:
             List of open orders
         """
         if not self.info or not self.wallet_address:
-            self.logger.error("Not connected to exchange")
+            self.logger.error(f"Not connected to exchange. info={self.info}, wallet_address={self.wallet_address}")
             return []
             
         try:
             open_orders = self.info.open_orders(self.wallet_address)
-            
+            self.logger.info(f"[DEBUG] Fetched {len(open_orders)} open orders from API for wallet {self.wallet_address}: {open_orders}")
             if symbol:
-                open_orders = [order for order in open_orders if order["coin"] == symbol]
-                
+                filtered = [order for order in open_orders if order['coin'] == symbol]
+                self.logger.info(f"[DEBUG] Filtering open orders for symbol '{symbol}'. Available coins: {[order['coin'] for order in open_orders]}")
+                self.logger.info(f"[DEBUG] Filtered open orders for symbol {symbol}: {filtered}")
+                return filtered
             return open_orders
         except Exception as e:
             self.logger.error(f"Error getting open orders: {str(e)}")
