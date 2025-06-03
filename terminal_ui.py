@@ -7,6 +7,7 @@ import json
 import queue
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
+import sys
 
 class ElysiumTerminalUI(cmd.Cmd):
     """Command-line interface for MMMM Trading Platform"""
@@ -30,8 +31,6 @@ class ElysiumTerminalUI(cmd.Cmd):
     Type 'help' to see available commands
 
     Useful Commands:
-    - connect     Connect to exchange
-                "connect mainnet" or "connect testnet"
     - balance     See your exchange balances
     - positions   Show your open positions
 
@@ -63,16 +62,13 @@ class ElysiumTerminalUI(cmd.Cmd):
     - help        List all commands
     '''
 
-
     def __init__(self, api_connector, order_handler, config_manager):
         super().__init__()
         self.prompt = '>>> '
         self.api_connector = api_connector
         self.order_handler = order_handler
         self.config_manager = config_manager
-        self.authenticated = False
-        self.last_command_output = ""
-
+        
         # Initialize strategy selector
         from strategy_selector import StrategySelector
         self.strategy_selector = StrategySelector(api_connector, order_handler, config_manager)
@@ -80,83 +76,15 @@ class ElysiumTerminalUI(cmd.Cmd):
     def preloop(self):
         """Setup before starting the command loop"""
         self.display_layout()
+        print("\nInitializing MMMM CLI...")
         
-        # Authenticate user before proceeding
-        auth_success = self.authenticate_user()
-        if not auth_success:
-            print("\nAuthentication failed. Exiting...")
-            import sys
-            sys.exit(1)
-        
-        self.authenticated = True
-        print("\nAuthentication successful!")
-        print("Initializing MMMM CLI...")
-        time.sleep(1)
-        print("Ready to trade!\n")
-        
-    def authenticate_user(self) -> bool:
-        """Authenticate user with password"""
-        # Password is already stored in config
-        if self.config_manager.get('password_hash'):
-            for attempt in range(3):  # Allow 3 attempts
-                password = input("Enter your password: ")
-                if self.config_manager.verify_password(password):
-                    return True
-                else:
-                    print(f"Incorrect password. {2-attempt} attempts remaining.")
-            return False
-        else:
-            # First-time setup
-            print("First-time setup. Please create a password:")
-            password = input("Enter new password: ")
-            confirm = input("Confirm password: ")
+        # Auto-connect to mainnet
+        wallet_address = os.getenv('WALLET_ADDRESS')
+        secret_key = os.getenv('WALLET_SECRET')
             
-            if password == confirm:
-                self.config_manager.set_password(password)
-                return True
-            else:
-                print("Passwords don't match.")
-                return False
-    
-    def display_layout(self):
-        """Display the interface layout"""
-        os.system('cls' if os.name == 'nt' else 'clear')
-        print(self.ASCII_ART)
-        print(self.WELCOME_MSG)
-        
-    def do_connect(self, arg):
-        """
-        Connect to Hyperliquid exchange
-        Usage: connect [mainnet|testnet]
-        Options:
-            mainnet    Connect to mainnet (default)
-            testnet    Connect to testnet
-        """
-        try:
-            # Parse network type from arguments
-            arg_lower = arg.lower()
-            if "testnet" in arg_lower:
-                use_testnet = True
-                network_name = "testnet"
-            else:
-                # Default to mainnet
-                use_testnet = False
-                network_name = "mainnet"
-            
-            # Import credentials from dontshareconfig.py
-            import dontshareconfig as ds
-            
-            # Select the appropriate credentials based on network
-            if use_testnet:
-                wallet_address = ds.testnet_wallet
-                secret_key = ds.testnet_secret
-            else:
-                wallet_address = ds.mainnet_wallet
-                secret_key = ds.mainnet_secret
-            
-            print(f"\nConnecting to Hyperliquid ({network_name})...")
-            success = self.api_connector.connect_hyperliquid(wallet_address, secret_key, use_testnet)
-            
+        if wallet_address and secret_key:
+            print("\nConnecting to Hyperliquid mainnet...")
+            success = self.api_connector.connect_hyperliquid(wallet_address, secret_key, False)  # False for mainnet
             if success:
                 print(f"Successfully connected to {wallet_address}")
                 # Initialize order handler with the connected exchange and info objects
@@ -165,10 +93,20 @@ class ElysiumTerminalUI(cmd.Cmd):
                 self.order_handler.wallet_address = wallet_address
             else:
                 print("Failed to connect to exchange")
-                    
-        except Exception as e:
-            print(f"Error connecting to exchange: {str(e)}")
-    
+                sys.exit(1)
+        else:
+            print("Error: Missing wallet credentials in environment variables")
+            sys.exit(1)
+            
+        time.sleep(1)
+        print("Ready to trade!\n")
+        
+    def display_layout(self):
+        """Display the interface layout"""
+        os.system('cls' if os.name == 'nt' else 'clear')
+        print(self.ASCII_ART)
+        print(self.WELCOME_MSG)
+        
     def do_balance(self, arg):
         """
         Show current balance across spot and perpetual markets
@@ -516,7 +454,8 @@ class ElysiumTerminalUI(cmd.Cmd):
                 
         except Exception as e:
             print(f"\nError placing perpetual limit sell order: {str(e)}")
-# ===================Close Position============================
+
+    # ===================Close Position============================
     def do_close_position(self, arg):
         """
         Close an entire perpetual position
@@ -553,7 +492,7 @@ class ElysiumTerminalUI(cmd.Cmd):
         except Exception as e:
             print(f"\nError closing position: {str(e)}")
 
-# ============================ Leverage Setting ===============================
+    # ============================ Leverage Setting ===============================
 
     def do_set_leverage(self, arg):
         """
@@ -809,21 +748,6 @@ class ElysiumTerminalUI(cmd.Cmd):
             print(row_str)
 
     # =====================================Strategy Selector=========================================
-
-    # These methods should be added to the MMMMTerminalUI class in terminal_ui.py
-
-    def __init__(self, api_connector, order_handler, config_manager):
-        super().__init__()
-        self.prompt = '>>> '
-        self.api_connector = api_connector
-        self.order_handler = order_handler
-        self.config_manager = config_manager
-        self.authenticated = False
-        self.last_command_output = ""
-        
-        # Initialize strategy selector
-        from strategy_selector import StrategySelector
-        self.strategy_selector = StrategySelector(api_connector, order_handler, config_manager)
 
     def do_select_strategy(self, arg):
         """

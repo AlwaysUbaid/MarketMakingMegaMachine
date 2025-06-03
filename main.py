@@ -6,6 +6,7 @@ import logging
 import argparse
 import json
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Import other modules
 from api_connector import ApiConnector
@@ -36,8 +37,6 @@ def parse_arguments():
                         help='Path to configuration file')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Enable verbose logging')
-    parser.add_argument('-t', '--testnet', action='store_true',
-                        help='Use testnet instead of mainnet')
     parser.add_argument('--log-file', type=str, 
                         help='Path to log file')
     
@@ -46,6 +45,9 @@ def parse_arguments():
 
 def main():
     """Main entry point for the application"""
+    # Load environment variables
+    load_dotenv()
+    
     # Parse command-line arguments
     args = parse_arguments()
     
@@ -67,14 +69,6 @@ def main():
         
         # Create and start the CLI
         terminal = ElysiumTerminalUI(api_connector, order_handler, config_manager)
-        
-        # Auto-connect if credentials are available
-        if args.testnet:
-            logger.info("Auto-connecting to testnet")
-            terminal.do_connect("testnet")
-        elif config_manager.get("auto_connect", False):
-            logger.info("Auto-connecting to mainnet")
-            terminal.do_connect("")
         
         # Start the CLI
         terminal.cmdloop()

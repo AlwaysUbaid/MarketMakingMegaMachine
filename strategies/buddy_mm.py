@@ -28,17 +28,17 @@ class BuddyMarketMaking(TradingStrategy):
             "description": "Trading pair symbol"
         },
         "bid_spread": {
-            "value": 0.0003,  # 0.1%
+            "value": 0.0001,
             "type": "float",
             "description": "Spread below mid price for buy orders (as a decimal)"
         },
         "ask_spread": {
-            "value": 0.0003,  # 0.1%
+            "value": 0.0002,
             "type": "float",
             "description": "Spread above mid price for sell orders (as a decimal)"
         },
         "order_amount": {
-            "value": 8.5,
+            "value": 450,
             "type": "float",
             "description": "Size of each order"
         },
