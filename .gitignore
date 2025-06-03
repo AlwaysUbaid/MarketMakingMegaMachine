@@ -7,4 +7,3 @@ elysium_config.json
 *.pyd
 *.pdb
 .env
-.env
