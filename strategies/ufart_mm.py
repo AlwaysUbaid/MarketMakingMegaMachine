@@ -2,11 +2,15 @@ import logging
 import threading
 import math
 import time
+import uuid
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List, Any
 
 # Import the base strategy class
 from strategy_selector import TradingStrategy
+
+# Class-level registry to track active instances per symbol
+_active_instances = {}
 
 class UfartMarketMaking(TradingStrategy):
     """
@@ -67,9 +71,19 @@ class UfartMarketMaking(TradingStrategy):
     def __init__(self, api_connector, order_handler, config_manager, params=None):
         """Initialize the market making strategy with custom parameters"""
         super().__init__(api_connector, order_handler, config_manager, params)
+        # Extract symbol first
+        self.symbol = self._get_param_value("symbol") if params else self.STRATEGY_PARAMS["symbol"]["value"]
+        # Generate a unique instance ID
+        self.instance_id = str(uuid.uuid4())
+        self.order_prefix = f"UFART-{self.instance_id}-"
+        # Check if an instance for this symbol already exists
+        if self.symbol in _active_instances:
+            self.logger.warning(f"An instance for symbol {self.symbol} already exists. This instance will not be registered.")
+        else:
+            _active_instances[self.symbol] = self
+            self.logger.info(f"Instance {self.instance_id} registered for symbol {self.symbol}.")
         
         # Extract parameter values
-        self.symbol = self._get_param_value("symbol")
         self.bid_spread = self._get_param_value("bid_spread")
         self.ask_spread = self._get_param_value("ask_spread")
         self.order_amount = self._get_param_value("order_amount")
@@ -121,7 +135,7 @@ class UfartMarketMaking(TradingStrategy):
         """Thread-safe status update"""
         with self.status_lock:
             self.status_message = message
-            self.logger.info(f"Status: {message}")
+            self.logger.info(f"[Instance {self.instance_id}] Status: {message}")
     
     def get_status(self):
         """Get current strategy status"""
@@ -168,11 +182,11 @@ class UfartMarketMaking(TradingStrategy):
                         quote_balance = float(balance.get("total", 0))  # Use total instead of available
                         break
                     
-            self.logger.info(f"Current balances: {asset_balance} {self.asset}, {quote_balance} {self.quote_asset}")
+            self.logger.info(f"[Instance {self.instance_id}] Current balances: {asset_balance} {self.asset}, {quote_balance} {self.quote_asset}")
             return asset_balance, quote_balance
             
         except Exception as e:
-            self.logger.error(f"Error getting balances: {str(e)}")
+            self.logger.error(f"[Instance {self.instance_id}] Error getting balances: {str(e)}")
             # If we can't get balances, assume we have funds to continue trading
             return 0, 99.0  # Default to $99 if we can't get actual balance
     
@@ -194,7 +208,7 @@ class UfartMarketMaking(TradingStrategy):
             error_msg = result.get("message", "Unknown error")
             # Check for insufficient spot balance error
             if "Insufficient spot balance" in error_msg:
-                self.logger.error(f"{side_str} order error: {error_msg}")
+                self.logger.error(f"[Instance {self.instance_id}] {side_str} order error: {error_msg}")
                 self._trigger_auto_cancel_all()
             return False, None, error_msg
             
@@ -205,23 +219,22 @@ class UfartMarketMaking(TradingStrategy):
         for status in result["response"]["data"]["statuses"]:
             if "error" in status:
                 error_msg = status["error"]
-                self.logger.error(f"{side_str} order error: {error_msg}")
+                self.logger.error(f"[Instance {self.instance_id}] {side_str} order error: {error_msg}")
                 if "Insufficient spot balance" in error_msg:
                     self._trigger_auto_cancel_all()
                 return False, None, error_msg
             
             if "resting" in status:
-                # If a successful order is placed, stop auto-cancel
                 self._stop_auto_cancel_all()
                 order_id = status["resting"]["oid"]
                 return True, order_id, None
                 
             if "filled" in status:
-                self._stop_auto_cancel_all()
                 # Order was immediately filled
+                self._stop_auto_cancel_all()
                 filled = status["filled"]
                 order_id = filled.get("oid", 0)
-                self.logger.info(f"{side_str} order immediately filled: {filled.get('totalSz', 0)} @ {filled.get('avgPx', 0)}")
+                self.logger.info(f"[Instance {self.instance_id}] {side_str} order immediately filled: {filled.get('totalSz', 0)} @ {filled.get('avgPx', 0)}")
                 return True, order_id, None
                 
         return False, None, "No resting order or specific error found in response"
@@ -242,7 +255,7 @@ class UfartMarketMaking(TradingStrategy):
             best_ask = market_data.get("best_ask", 0)
             
             if not best_bid or not best_ask:
-                self.logger.error("Missing market data, cannot place buy order")
+                self.logger.error(f"[Instance {self.instance_id}] Missing market data, cannot place buy order")
                 return False, None
             
             # Calculate buy price as spread away from mid price
@@ -258,7 +271,7 @@ class UfartMarketMaking(TradingStrategy):
             # Use exact order amount
             buy_size = self.order_amount
             
-            self.logger.info(f"Placing buy order: {buy_size} {self.symbol} @ {bid_price}")
+            self.logger.info(f"[Instance {self.instance_id}] Placing buy order: {buy_size} {self.symbol} @ {bid_price}")
             
             # Place appropriate order type
             if self.is_perp:
@@ -271,14 +284,14 @@ class UfartMarketMaking(TradingStrategy):
             if success:
                 self.active_buy_order_id = order_id
                 self.active_buy_order_time = time.time()
-                self.logger.info(f"Successfully placed buy order ID {order_id} at {bid_price}")
+                self.logger.info(f"[Instance {self.instance_id}] Successfully placed buy order ID {order_id} at {bid_price}")
                 return True, order_id
             else:
-                self.logger.error(f"Failed to place buy order: {error_msg}")
+                self.logger.error(f"[Instance {self.instance_id}] Failed to place buy order: {error_msg}")
                 return False, None
                 
         except Exception as e:
-            self.logger.error(f"Error placing buy order: {str(e)}")
+            self.logger.error(f"[Instance {self.instance_id}] Error placing buy order: {str(e)}")
             return False, None
     
     def _place_sell_order(self, market_data, available_balance):
@@ -298,7 +311,7 @@ class UfartMarketMaking(TradingStrategy):
             best_ask = market_data.get("best_ask", 0)
             
             if not best_bid or not best_ask:
-                self.logger.error("Missing market data, cannot place sell order")
+                self.logger.error(f"[Instance {self.instance_id}] Missing market data, cannot place sell order")
                 return False, None
             
             # Calculate appropriate sell size based on available balance
@@ -306,7 +319,7 @@ class UfartMarketMaking(TradingStrategy):
             
             # Check if we have enough to sell
             if sell_size < 0.00001:  # Minimum size to avoid errors
-                self.logger.warning(f"Available balance too small to sell: {available_balance}")
+                self.logger.warning(f"[Instance {self.instance_id}] Available balance too small to sell: {available_balance}")
                 return False, None
             
             # Calculate sell price as spread away from mid price
@@ -318,7 +331,7 @@ class UfartMarketMaking(TradingStrategy):
             # Format price to valid tick size
             ask_price = self._format_price(ask_price, tick_size)
             
-            self.logger.info(f"Placing sell order: {sell_size} {self.symbol} @ {ask_price}")
+            self.logger.info(f"[Instance {self.instance_id}] Placing sell order: {sell_size} {self.symbol} @ {ask_price}")
             
             # Place appropriate order type
             if self.is_perp:
@@ -331,14 +344,14 @@ class UfartMarketMaking(TradingStrategy):
             if success:
                 self.active_sell_order_id = order_id
                 self.active_sell_order_time = time.time()
-                self.logger.info(f"Successfully placed sell order ID {order_id} at {ask_price}")
+                self.logger.info(f"[Instance {self.instance_id}] Successfully placed sell order ID {order_id} at {ask_price}")
                 return True, order_id
             else:
-                self.logger.error(f"Failed to place sell order: {error_msg}")
+                self.logger.error(f"[Instance {self.instance_id}] Failed to place sell order: {error_msg}")
                 return False, None
                 
         except Exception as e:
-            self.logger.error(f"Error placing sell order: {str(e)}")
+            self.logger.error(f"[Instance {self.instance_id}] Error placing sell order: {str(e)}")
             return False, None
             
     def _check_orders_status(self):
@@ -361,7 +374,7 @@ class UfartMarketMaking(TradingStrategy):
                 buy_still_active = any(order.get("oid") == self.active_buy_order_id for order in open_orders)
                 
                 if not buy_still_active:
-                    self.logger.info(f"Buy order {self.active_buy_order_id} is no longer open (likely filled or cancelled)")
+                    self.logger.info(f"[Instance {self.instance_id}] Buy order {self.active_buy_order_id} is no longer open (likely filled or cancelled)")
                     self.active_buy_order_id = None
                     self.active_buy_order_time = None
             
@@ -370,14 +383,14 @@ class UfartMarketMaking(TradingStrategy):
                 sell_still_active = any(order.get("oid") == self.active_sell_order_id for order in open_orders)
                 
                 if not sell_still_active:
-                    self.logger.info(f"Sell order {self.active_sell_order_id} is no longer open (likely filled or cancelled)")
+                    self.logger.info(f"[Instance {self.instance_id}] Sell order {self.active_sell_order_id} is no longer open (likely filled or cancelled)")
                     self.active_sell_order_id = None
                     self.active_sell_order_time = None
                     
             return buy_still_active, sell_still_active
             
         except Exception as e:
-            self.logger.error(f"Error checking order status: {str(e)}")
+            self.logger.error(f"[Instance {self.instance_id}] Error checking order status: {str(e)}")
             return False, False
     
     def _run_strategy(self):
@@ -387,7 +400,7 @@ class UfartMarketMaking(TradingStrategy):
         # Verify exchange connection
         if not self.api_connector.exchange or not self.order_handler.exchange:
             self.set_status("Error: Exchange connection is not active. Please connect first.")
-            self.logger.error("Exchange connection not active when starting strategy")
+            self.logger.error(f"[Instance {self.instance_id}] Exchange connection not active when starting strategy")
             self.running = False
             return
         
@@ -395,13 +408,13 @@ class UfartMarketMaking(TradingStrategy):
         if self.is_perp and self.leverage > 1:
             try:
                 self.order_handler._set_leverage(self.symbol, self.leverage)
-                self.logger.info(f"Set leverage to {self.leverage}x for {self.symbol}")
+                self.logger.info(f"[Instance {self.instance_id}] Set leverage to {self.leverage}x for {self.symbol}")
             except Exception as e:
-                self.logger.error(f"Failed to set leverage: {str(e)}")
+                self.logger.error(f"[Instance {self.instance_id}] Failed to set leverage: {str(e)}")
         
         # Initial check of balances
         asset_balance, quote_balance = self.get_balances()
-        self.logger.info(f"Starting with: {asset_balance} {self.asset}, {quote_balance} {self.quote_asset}")
+        self.logger.info(f"[Instance {self.instance_id}] Starting with: {asset_balance} {self.asset}, {quote_balance} {self.quote_asset}")
         
         # Main strategy variables
         self.running = True
@@ -420,7 +433,7 @@ class UfartMarketMaking(TradingStrategy):
                 
                 # Check if it's time to cancel all orders based on the timer
                 if (current_time - self.last_cancel_time) > self.order_max_age:
-                    self.logger.info(f"Cancelling all orders after {self.order_max_age}s timeout")
+                    self.logger.info(f"[Instance {self.instance_id}] Cancelling all orders after {self.order_max_age}s timeout")
                     self.order_handler.cancel_all_orders(self.symbol)
                     self.active_buy_order_id = None
                     self.active_sell_order_id = None
@@ -518,32 +531,40 @@ class UfartMarketMaking(TradingStrategy):
                 time.sleep(0.01)
                 
         except Exception as e:
-            self.logger.error(f"Error in strategy loop: {str(e)}", exc_info=True)
+            self.logger.error(f"[Instance {self.instance_id}] Error in strategy loop: {str(e)}", exc_info=True)
             self.set_status(f"Error: {str(e)}")
         
         finally:
-            self._stop_auto_cancel_all()
-            self._cancel_active_orders()
-            self.running = False
-            self.set_status("Market making strategy stopped")
+            self._cleanup()
+    
+    def _cleanup(self):
+        """Cleanup method to stop threads and cancel orders"""
+        self._stop_auto_cancel_all()
+        self._cancel_active_orders()
+        self.running = False
+        self.set_status("Market making strategy stopped")
+        # Remove instance from registry
+        if self.symbol in _active_instances and _active_instances[self.symbol] == self:
+            del _active_instances[self.symbol]
+            self.logger.info(f"[Instance {self.instance_id}] Instance removed from registry.")
     
     def _cancel_active_orders(self):
         """Cancel all active orders for this strategy"""
         try:
             if self.active_buy_order_id:
                 self.order_handler.cancel_order(self.symbol, self.active_buy_order_id)
-                self.logger.info(f"Cancelled buy order {self.active_buy_order_id}")
+                self.logger.info(f"[Instance {self.instance_id}] Cancelled buy order {self.active_buy_order_id}")
                 self.active_buy_order_id = None
                 self.active_buy_order_time = None
                 
             if self.active_sell_order_id:
                 self.order_handler.cancel_order(self.symbol, self.active_sell_order_id)
-                self.logger.info(f"Cancelled sell order {self.active_sell_order_id}")
+                self.logger.info(f"[Instance {self.instance_id}] Cancelled sell order {self.active_sell_order_id}")
                 self.active_sell_order_id = None
                 self.active_sell_order_time = None
                 
         except Exception as e:
-            self.logger.error(f"Error cancelling orders: {str(e)}")
+            self.logger.error(f"[Instance {self.instance_id}] Error cancelling orders: {str(e)}")
     
     def _get_tick_size(self, market_data=None):
         """
@@ -620,7 +641,7 @@ class UfartMarketMaking(TradingStrategy):
                 return 0.00001
                 
         except Exception as e:
-            self.logger.warning(f"Error determining tick size: {str(e)}")
+            self.logger.warning(f"[Instance {self.instance_id}] Error determining tick size: {str(e)}")
             return 0.00001  # Very conservative default
     
     def _format_price(self, price, tick_size):
@@ -664,7 +685,6 @@ class UfartMarketMaking(TradingStrategy):
             buy_order_age = (current_time - self.active_buy_order_time) if self.active_buy_order_time else 0
             sell_order_age = (current_time - self.active_sell_order_time) if self.active_sell_order_time else 0
             
-            
             metrics = {
                 "symbol": self.symbol,
                 "mid_price": self.mid_price,
@@ -683,7 +703,7 @@ class UfartMarketMaking(TradingStrategy):
             return metrics
             
         except Exception as e:
-            self.logger.error(f"Error calculating metrics: {str(e)}")
+            self.logger.error(f"[Instance {self.instance_id}] Error calculating metrics: {str(e)}")
             return {
                 "symbol": self.symbol,
                 "error": str(e)
@@ -691,7 +711,7 @@ class UfartMarketMaking(TradingStrategy):
 
     def _trigger_auto_cancel_all(self):
         if not self.auto_cancel_active:
-            self.logger.warning("Triggering auto-cancel-all routine due to insufficient spot balance error.")
+            self.logger.warning(f"[Instance {self.instance_id}] Triggering auto-cancel-all routine due to insufficient spot balance error.")
             self.order_handler.cancel_all_orders(self.symbol)
             self.auto_cancel_active = True
             self.auto_cancel_thread = threading.Thread(target=self._auto_cancel_all_loop, daemon=True)
@@ -699,7 +719,7 @@ class UfartMarketMaking(TradingStrategy):
 
     def _auto_cancel_all_loop(self):
         while self.auto_cancel_active and self.running:
-            self.logger.info(f"[AutoCancel] Cancelling all orders every {self.auto_cancel_interval}s due to insufficient spot balance error.")
+            self.logger.info(f"[Instance {self.instance_id}] [AutoCancel] Cancelling all orders every {self.auto_cancel_interval}s due to insufficient spot balance error.")
             self.order_handler.cancel_all_orders(self.symbol)
             for _ in range(self.auto_cancel_interval * 10):
                 if not self.auto_cancel_active or not self.running:
@@ -708,5 +728,5 @@ class UfartMarketMaking(TradingStrategy):
 
     def _stop_auto_cancel_all(self):
         if self.auto_cancel_active:
-            self.logger.info("Stopping auto-cancel-all routine (order placed or strategy stopped).")
+            self.logger.info(f"[Instance {self.instance_id}] Stopping auto-cancel-all routine (order placed or strategy stopped).")
             self.auto_cancel_active = False

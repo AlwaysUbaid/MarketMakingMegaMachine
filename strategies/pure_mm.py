@@ -2,11 +2,15 @@ import logging
 import threading
 import math
 import time
+import uuid
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List, Any
 
 # Import the base strategy class
 from strategy_selector import TradingStrategy
+
+# Class-level registry to track active instances per symbol
+_active_instances = {}
 
 class PureMarketMaking(TradingStrategy):
     """
@@ -67,9 +71,14 @@ class PureMarketMaking(TradingStrategy):
     def __init__(self, api_connector, order_handler, config_manager, params=None):
         """Initialize the market making strategy with custom parameters"""
         super().__init__(api_connector, order_handler, config_manager, params)
+        self.symbol = self._get_param_value("symbol") if params else self.STRATEGY_PARAMS["symbol"]["value"]
+        self.quote_asset = self.symbol.split('/')[1] if '/' in self.symbol else "USDC"
+        self.instance_id = uuid.uuid4().hex[:8]
+        if self.symbol not in _active_instances:
+            _active_instances[self.symbol] = []
+        _active_instances[self.symbol].append(self)
         
         # Extract parameter values
-        self.symbol = self._get_param_value("symbol")
         self.bid_spread = self._get_param_value("bid_spread")
         self.ask_spread = self._get_param_value("ask_spread")
         self.order_amount = self._get_param_value("order_amount")
@@ -99,7 +108,6 @@ class PureMarketMaking(TradingStrategy):
         
         # Extract asset name from symbol for balance lookup
         self.asset = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
-        self.quote_asset = self.symbol.split('/')[1] if '/' in self.symbol else "USDC"
         
     def _get_param_value(self, param_name):
         """Helper method to extract parameter values"""
@@ -707,3 +715,10 @@ class PureMarketMaking(TradingStrategy):
         if self.auto_cancel_active:
             self.logger.info("Stopping auto-cancel-all routine (order placed or strategy stopped).")
             self.auto_cancel_active = False
+
+    def __del__(self):
+        """Cleanup method to stop threads and cancel orders"""
+        self._stop_auto_cancel_all()
+        self._cancel_active_orders()
+        self.running = False
+        self.set_status("Instance cleaned up")
