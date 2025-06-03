@@ -6,3 +6,5 @@ elysium_config.json
 *.pyo
 *.pyd
 *.pdb
+.env
+.env
