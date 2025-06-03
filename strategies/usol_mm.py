@@ -92,6 +92,10 @@ class UsolMarketMaking(TradingStrategy):
         self.error_count = 0
         self.consecutive_errors = 0
         self.last_successful_placement = 0
+        self.last_cancel_time = 0  # Track when we last cancelled all orders
+        self.auto_cancel_thread = None
+        self.auto_cancel_active = False
+        self.auto_cancel_interval = 15  # Default, can be set via param if desired
         
         # Extract asset name from symbol for balance lookup
         self.asset = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
@@ -188,6 +192,9 @@ class UsolMarketMaking(TradingStrategy):
             
         if result["status"] != "ok":
             error_msg = result.get("message", "Unknown error")
+            if "Insufficient spot balance" in error_msg:
+                self.logger.error(f"{side_str} order error: {error_msg}")
+                self._trigger_auto_cancel_all()
             return False, None, error_msg
             
         if "response" not in result or "data" not in result["response"] or "statuses" not in result["response"]["data"]:
@@ -198,14 +205,18 @@ class UsolMarketMaking(TradingStrategy):
             if "error" in status:
                 error_msg = status["error"]
                 self.logger.error(f"{side_str} order error: {error_msg}")
+                if "Insufficient spot balance" in error_msg:
+                    self._trigger_auto_cancel_all()
                 return False, None, error_msg
             
             if "resting" in status:
+                self._stop_auto_cancel_all()
                 order_id = status["resting"]["oid"]
                 return True, order_id, None
                 
             if "filled" in status:
                 # Order was immediately filled
+                self._stop_auto_cancel_all()
                 filled = status["filled"]
                 order_id = filled.get("oid", 0)
                 self.logger.info(f"{side_str} order immediately filled: {filled.get('totalSz', 0)} @ {filled.get('avgPx', 0)}")
@@ -405,31 +416,17 @@ class UsolMarketMaking(TradingStrategy):
                     time.sleep(0.1)
                     continue
                 
-                # Check if orders need to be cancelled due to age
-                need_cancel_buy = False
-                need_cancel_sell = False
-                
-                # Check buy order age
-                if self.active_buy_order_id and self.active_buy_order_time and \
-                (current_time - self.active_buy_order_time) > self.order_max_age:
-                    self.logger.info(f"Buy order {self.active_buy_order_id} exceeded max age of {self.order_max_age}s, cancelling")
-                    self.order_handler.cancel_order(self.symbol, self.active_buy_order_id)
+                # Check if it's time to cancel all orders based on the timer
+                if (current_time - self.last_cancel_time) > self.order_max_age:
+                    self.logger.info(f"Cancelling all orders after {self.order_max_age}s timeout")
+                    self.order_handler.cancel_all_orders(self.symbol)
                     self.active_buy_order_id = None
-                    self.active_buy_order_time = None
-                    need_cancel_buy = True
-                
-                # Check sell order age
-                if self.active_sell_order_id and self.active_sell_order_time and \
-                (current_time - self.active_sell_order_time) > self.order_max_age:
-                    self.logger.info(f"Sell order {self.active_sell_order_id} exceeded max age of {self.order_max_age}s, cancelling")
-                    self.order_handler.cancel_order(self.symbol, self.active_sell_order_id)
                     self.active_sell_order_id = None
+                    self.active_buy_order_time = None
                     self.active_sell_order_time = None
-                    need_cancel_sell = True
-                
-                # If we cancelled any orders, we need fresh market data to place new ones
-                if need_cancel_buy or need_cancel_sell:
-                    # Get fresh market data
+                    self.last_cancel_time = current_time
+                    
+                    # Get fresh market data after cancellation
                     market_data = self.api_connector.get_market_data(self.symbol)
                     if "error" in market_data:
                         self.set_status(f"Error getting market data after cancel: {market_data['error']}")
@@ -446,14 +443,13 @@ class UsolMarketMaking(TradingStrategy):
                         # Get latest balances
                         asset_balance, quote_balance = self.get_balances()
                         
-                        # Place new orders if needed
-                        if need_cancel_buy and quote_balance > 1.0:
+                        # Place new orders
+                        if quote_balance > 1.0:
                             self._place_buy_order(market_data)
                             
-                        if need_cancel_sell and asset_balance > 0.00001:
+                        if asset_balance > 0.00001:
                             self._place_sell_order(market_data, asset_balance)
-                # END of new auto-cancel block
-
+                
                 # Check if it's time to refresh
                 refresh_needed = (current_time - self.last_tick_time) >= self.refresh_time
                 should_check_orders = (current_time - last_order_check) >= 1  # Check order status frequently
@@ -524,7 +520,7 @@ class UsolMarketMaking(TradingStrategy):
             self.set_status(f"Error: {str(e)}")
         
         finally:
-            # Clean up when stopping
+            self._stop_auto_cancel_all()
             self._cancel_active_orders()
             self.running = False
             self.set_status("Market making strategy stopped")
@@ -690,3 +686,25 @@ class UsolMarketMaking(TradingStrategy):
                 "symbol": self.symbol,
                 "error": str(e)
             }
+
+    def _trigger_auto_cancel_all(self):
+        if not self.auto_cancel_active:
+            self.logger.warning("Triggering auto-cancel-all routine due to insufficient spot balance error.")
+            self.order_handler.cancel_all_orders(self.symbol)
+            self.auto_cancel_active = True
+            self.auto_cancel_thread = threading.Thread(target=self._auto_cancel_all_loop, daemon=True)
+            self.auto_cancel_thread.start()
+
+    def _auto_cancel_all_loop(self):
+        while self.auto_cancel_active and self.running:
+            self.logger.info(f"[AutoCancel] Cancelling all orders every {self.auto_cancel_interval}s due to insufficient spot balance error.")
+            self.order_handler.cancel_all_orders(self.symbol)
+            for _ in range(self.auto_cancel_interval * 10):
+                if not self.auto_cancel_active or not self.running:
+                    break
+                time.sleep(0.1)
+
+    def _stop_auto_cancel_all(self):
+        if self.auto_cancel_active:
+            self.logger.info("Stopping auto-cancel-all routine (order placed or strategy stopped).")
+            self.auto_cancel_active = False
