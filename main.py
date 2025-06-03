@@ -7,6 +7,10 @@ import argparse
 import json
 import time
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Import other modules
 from api_connector import ApiConnector
