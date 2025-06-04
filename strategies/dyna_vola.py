@@ -481,4 +481,77 @@ class DynaVolaStrategy(TradingStrategy):
             return {
                 "symbol": self.symbol,
                 "error": str(e)
-            } 
+            }
+
+    def _check_order_result(self, result, side_str):
+        """
+        Check order result and handle errors
+        
+        Args:
+            result: Order result dictionary
+            side_str: String indicating order side ("Buy" or "Sell")
+            
+        Returns:
+            Tuple of (success, order_id, error_message)
+        """
+        if not result:
+            return False, None, "No result returned"
+            
+        if result["status"] != "ok":
+            error_msg = result.get("message", "Unknown error")
+            if "Insufficient spot balance" in error_msg or "Insufficient balance" in error_msg:
+                self.logger.error(f"{side_str} order error: {error_msg}")
+                self._trigger_auto_cancel_all()
+            return False, None, error_msg
+            
+        if "response" not in result or "data" not in result["response"] or "statuses" not in result["response"]["data"]:
+            return False, None, "Invalid response format"
+            
+        # Check for specific error messages in response
+        for status in result["response"]["data"]["statuses"]:
+            if "error" in status:
+                error_msg = status["error"]
+                self.logger.error(f"{side_str} order error: {error_msg}")
+                if "Insufficient spot balance" in error_msg or "Insufficient balance" in error_msg:
+                    self._trigger_auto_cancel_all()
+                return False, None, error_msg
+            
+            if "resting" in status:
+                self._stop_auto_cancel_all()
+                order_id = status["resting"]["oid"]
+                return True, order_id, None
+                
+            if "filled" in status:
+                # Order was immediately filled
+                self._stop_auto_cancel_all()
+                filled = status["filled"]
+                order_id = filled.get("oid", 0)
+                self.logger.info(f"{side_str} order immediately filled: {filled.get('totalSz', 0)} @ {filled.get('avgPx', 0)}")
+                return True, order_id, None
+                
+        return False, None, "No resting order or specific error found in response"
+
+    def _trigger_auto_cancel_all(self):
+        """Trigger the auto-cancel-all routine"""
+        if not self.auto_cancel_active:
+            self.logger.warning("Triggering auto-cancel-all routine due to insufficient spot balance error.")
+            self.order_handler.cancel_all_orders()
+            self.auto_cancel_active = True
+            self.auto_cancel_thread = threading.Thread(target=self._auto_cancel_all_loop, daemon=True)
+            self.auto_cancel_thread.start()
+
+    def _auto_cancel_all_loop(self):
+        """Background thread that continuously cancels all orders"""
+        while self.auto_cancel_active and self.running:
+            self.logger.info(f"[AutoCancel] Cancelling all orders every {self.auto_cancel_interval}s due to insufficient spot balance error.")
+            self.order_handler.cancel_all_orders()
+            for _ in range(self.auto_cancel_interval * 10):
+                if not self.auto_cancel_active or not self.running:
+                    break
+                time.sleep(0.1)
+
+    def _stop_auto_cancel_all(self):
+        """Stop the auto-cancel-all routine"""
+        self.auto_cancel_active = False
+        if hasattr(self, 'auto_cancel_thread') and self.auto_cancel_thread:
+            self.auto_cancel_thread.join(timeout=1.0) 

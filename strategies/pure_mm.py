@@ -71,6 +71,16 @@ class PureMarketMaking(TradingStrategy):
             "value": 1,
             "type": "int",
             "description": "Leverage to use for perpetual trading (if is_perp is True)"
+        },
+        "use_dynamic_spreads": {
+            "value": False,
+            "type": "bool",
+            "description": "Whether to use dynamic spreads"
+        },
+        "volatility_window": {
+            "value": 10,
+            "type": "int",
+            "description": "Volatility window for dynamic spreads"
         }
     }
     
@@ -89,6 +99,24 @@ class PureMarketMaking(TradingStrategy):
         self.max_order_distance = self._get_param_value("max_order_distance")
         self.is_perp = self._get_param_value("is_perp")
         self.leverage = self._get_param_value("leverage")
+
+        # Dynamic spread parameters
+        self.use_dynamic_spreads = self._get_param_value("use_dynamic_spreads")
+        self.volatility_window = self._get_param_value("volatility_window")
+
+        # Store original spreads for reference
+        self.original_bid_spread = self.bid_spread
+        self.original_ask_spread = self.ask_spread
+        
+        # Initialize volatility spread manager if enabled
+        if self.use_dynamic_spreads:
+            self.spread_manager = VolatilitySpreadManager(
+                base_bid_spread=self.bid_spread,
+                base_ask_spread=self.ask_spread,
+                volatility_window=self.volatility_window,
+                price_window=200
+            )
+            self.logger.info("Dynamic spreads enabled with volatility-based adjustments")
         
         # Runtime variables
         self.last_tick_time = 0
@@ -110,6 +138,9 @@ class PureMarketMaking(TradingStrategy):
         self.strategy_start_time = 0  # When the strategy started
         self.emergency_sell_done = False  # Flag to track if emergency sell was done
         self.auto_cancel_stop_event = threading.Event()  # For stopping the auto-cancel thread
+        self.auto_cancel_active = False
+        self.auto_cancel_thread = None
+        self.auto_cancel_interval = 5  # Default interval in seconds
         
         # Extract asset name from symbol for balance lookup
         self.asset = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
@@ -206,6 +237,9 @@ class PureMarketMaking(TradingStrategy):
             
         if result["status"] != "ok":
             error_msg = result.get("message", "Unknown error")
+            if "Insufficient spot balance" in error_msg or "Insufficient balance" in error_msg:
+                self.logger.error(f"{side_str} order error: {error_msg}")
+                self._trigger_auto_cancel_all()
             return False, None, error_msg
             
         if "response" not in result or "data" not in result["response"] or "statuses" not in result["response"]["data"]:
@@ -216,14 +250,18 @@ class PureMarketMaking(TradingStrategy):
             if "error" in status:
                 error_msg = status["error"]
                 self.logger.error(f"{side_str} order error: {error_msg}")
+                if "Insufficient spot balance" in error_msg or "Insufficient balance" in error_msg:
+                    self._trigger_auto_cancel_all()
                 return False, None, error_msg
             
             if "resting" in status:
+                self._stop_auto_cancel_all()
                 order_id = status["resting"]["oid"]
                 return True, order_id, None
                 
             if "filled" in status:
                 # Order was immediately filled
+                self._stop_auto_cancel_all()
                 filled = status["filled"]
                 order_id = filled.get("oid", 0)
                 self.logger.info(f"{side_str} order immediately filled: {filled.get('totalSz', 0)} @ {filled.get('avgPx', 0)}")
@@ -818,3 +856,28 @@ class PureMarketMaking(TradingStrategy):
                 "symbol": self.symbol,
                 "error": str(e)
             }
+
+    def _trigger_auto_cancel_all(self):
+        """Trigger the auto-cancel-all routine"""
+        if not self.auto_cancel_active:
+            self.logger.warning("Triggering auto-cancel-all routine due to insufficient spot balance error.")
+            self.order_handler.cancel_all_orders()
+            self.auto_cancel_active = True
+            self.auto_cancel_thread = threading.Thread(target=self._auto_cancel_all_loop, daemon=True)
+            self.auto_cancel_thread.start()
+
+    def _auto_cancel_all_loop(self):
+        """Background thread that continuously cancels all orders"""
+        while self.auto_cancel_active and self.running:
+            self.logger.info(f"[AutoCancel] Cancelling all orders every {self.auto_cancel_interval}s due to insufficient spot balance error.")
+            self.order_handler.cancel_all_orders()
+            for _ in range(self.auto_cancel_interval * 10):
+                if not self.auto_cancel_active or not self.running:
+                    break
+                time.sleep(0.1)
+
+    def _stop_auto_cancel_all(self):
+        """Stop the auto-cancel-all routine"""
+        self.auto_cancel_active = False
+        if hasattr(self, 'auto_cancel_thread') and self.auto_cancel_thread:
+            self.auto_cancel_thread.join(timeout=1.0)

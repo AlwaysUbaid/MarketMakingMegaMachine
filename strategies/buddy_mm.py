@@ -104,7 +104,7 @@ class BuddyMarketMaking(TradingStrategy):
         self.last_cancel_time = 0  # Track when we last cancelled all orders
         self.auto_cancel_thread = None
         self.auto_cancel_active = False
-        self.auto_cancel_interval = 15  # Default, can be set via param if desired
+        self.auto_cancel_interval = 5  # Default interval in seconds
         
         # Extract asset name from symbol for balance lookup
         self.asset = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
@@ -200,7 +200,7 @@ class BuddyMarketMaking(TradingStrategy):
             
         if result["status"] != "ok":
             error_msg = result.get("message", "Unknown error")
-            if "Insufficient spot balance" in error_msg:
+            if "Insufficient spot balance" in error_msg or "Insufficient balance" in error_msg:
                 self.logger.error(f"{side_str} order error: {error_msg}")
                 self._trigger_auto_cancel_all()
             return False, None, error_msg
@@ -213,7 +213,7 @@ class BuddyMarketMaking(TradingStrategy):
             if "error" in status:
                 error_msg = status["error"]
                 self.logger.error(f"{side_str} order error: {error_msg}")
-                if "Insufficient spot balance" in error_msg:
+                if "Insufficient spot balance" in error_msg or "Insufficient balance" in error_msg:
                     self._trigger_auto_cancel_all()
                 return False, None, error_msg
             

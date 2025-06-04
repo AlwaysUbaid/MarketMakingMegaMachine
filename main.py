@@ -43,10 +43,26 @@ def parse_arguments():
                         help='Use testnet instead of mainnet')
     parser.add_argument('--log-file', type=str, 
                         help='Path to log file')
-    parser.add_argument('-s', '--strategy', type=str,
-                        help='Strategy to run automatically')
+    parser.add_argument('-s', '--strategy', type=str, required=True,
+                        help='Strategy to run (e.g., ubtc_mm, ueth_mm, etc.)')
     parser.add_argument('-p', '--params', type=str,
                         help='JSON string of strategy parameters')
+    parser.add_argument('--symbol', type=str,
+                        help='Trading pair symbol (e.g., UBTC/USDC)')
+    parser.add_argument('--bid-spread', type=float,
+                        help='Bid spread as decimal (e.g., 0.0001 for 0.01%)')
+    parser.add_argument('--ask-spread', type=float,
+                        help='Ask spread as decimal (e.g., 0.0001 for 0.01%)')
+    parser.add_argument('--order-amount', type=float,
+                        help='Size of each order')
+    parser.add_argument('--refresh-time', type=int,
+                        help='Time in seconds between order refresh')
+    parser.add_argument('--is-perp', action='store_true',
+                        help='Trade perpetual contracts instead of spot')
+    parser.add_argument('--leverage', type=int, default=1,
+                        help='Leverage for perpetual trading')
+    parser.add_argument('--use-dynamic-spreads', action='store_true',
+                        help='Enable dynamic spread adjustment based on volatility')
     
     return parser.parse_args()
 
@@ -161,17 +177,36 @@ def main():
         order_handler.info = api_connector.info
         order_handler.wallet_address = api_connector.wallet_address
         
-        # If a strategy is specified, run it in headless mode
-        if args.strategy:
-            run_headless(api_connector, order_handler, config_manager, args.strategy, args.params)
-        else:
-            # If no strategy is specified, start the CLI
-            from terminal_ui import ElysiumTerminalUI
-            
-            # Create and start the CLI with auto-authentication
-            terminal = ElysiumTerminalUI(api_connector, order_handler, config_manager)
-            terminal.authenticated = True  # Skip password authentication
-            terminal.cmdloop()
+        # Build strategy parameters from command line arguments
+        strategy_params = {}
+        if args.symbol:
+            strategy_params["symbol"] = {"value": args.symbol}
+        if args.bid_spread is not None:
+            strategy_params["bid_spread"] = {"value": args.bid_spread}
+        if args.ask_spread is not None:
+            strategy_params["ask_spread"] = {"value": args.ask_spread}
+        if args.order_amount is not None:
+            strategy_params["order_amount"] = {"value": args.order_amount}
+        if args.refresh_time is not None:
+            strategy_params["refresh_time"] = {"value": args.refresh_time}
+        if args.is_perp:
+            strategy_params["is_perp"] = {"value": True}
+            if args.leverage > 1:
+                strategy_params["leverage"] = {"value": args.leverage}
+        if args.use_dynamic_spreads:
+            strategy_params["use_dynamic_spreads"] = {"value": True}
+        
+        # If params were provided as JSON, merge them with command line params
+        if args.params:
+            try:
+                json_params = json.loads(args.params)
+                strategy_params.update(json_params)
+            except json.JSONDecodeError:
+                logger.error(f"Invalid JSON parameters: {args.params}")
+                sys.exit(1)
+        
+        # Run the strategy
+        run_headless(api_connector, order_handler, config_manager, args.strategy, strategy_params)
         
     except KeyboardInterrupt:
         logger.info("Shutting down due to keyboard interrupt")
@@ -179,7 +214,6 @@ def main():
         logger.error(f"Error in main: {e}", exc_info=True)
     
     logger.info("MMMM Trading Platform shutdown complete")
-
 
 if __name__ == "__main__":
     main()
