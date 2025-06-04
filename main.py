@@ -43,7 +43,7 @@ def parse_arguments():
                         help='Use testnet instead of mainnet')
     parser.add_argument('--log-file', type=str, 
                         help='Path to log file')
-    parser.add_argument('-s', '--strategy', type=str, required=True,
+    parser.add_argument('-s', '--strategy', type=str,
                         help='Strategy to run (e.g., ubtc_mm, ueth_mm, etc.)')
     parser.add_argument('-p', '--params', type=str,
                         help='JSON string of strategy parameters')
@@ -63,6 +63,8 @@ def parse_arguments():
                         help='Leverage for perpetual trading')
     parser.add_argument('--use-dynamic-spreads', action='store_true',
                         help='Enable dynamic spread adjustment based on volatility')
+    parser.add_argument('-ca', '--cancel-all', action='store_true',
+                        help='Cancel all open orders and exit')
     
     return parser.parse_args()
 
@@ -143,6 +145,34 @@ def run_headless(api_connector, order_handler, config_manager, strategy_name, st
         logger.error(f"Failed to start strategy: {strategy_name}")
         return False
 
+def cancel_all_orders(api_connector, order_handler):
+    """Cancel all open orders"""
+    logger = logging.getLogger("mmmm")
+    
+    try:
+        # Get all open orders
+        open_orders = order_handler.get_open_orders()
+        
+        if not open_orders:
+            logger.info("No open orders found")
+            return True
+            
+        logger.info(f"Found {len(open_orders)} open orders. Cancelling all...")
+        
+        # Cancel all orders
+        result = order_handler.cancel_all_orders()
+        
+        if result and result.get("status") == "ok":
+            logger.info("Successfully cancelled all orders")
+            return True
+        else:
+            logger.error(f"Failed to cancel all orders: {result}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error cancelling orders: {str(e)}")
+        return False
+
 def main():
     """Main entry point for the application"""
     # Parse command-line arguments
@@ -176,6 +206,21 @@ def main():
         order_handler.exchange = api_connector.exchange
         order_handler.info = api_connector.info
         order_handler.wallet_address = api_connector.wallet_address
+        
+        # If cancel-all flag is set, cancel all orders and exit
+        if args.cancel_all:
+            logger.info("Cancel-all flag detected. Cancelling all orders...")
+            if cancel_all_orders(api_connector, order_handler):
+                logger.info("Successfully cancelled all orders. Exiting.")
+                sys.exit(0)
+            else:
+                logger.error("Failed to cancel all orders. Exiting.")
+                sys.exit(1)
+        
+        # If no strategy specified, exit
+        if not args.strategy:
+            logger.error("No strategy specified. Use -s to specify a strategy.")
+            sys.exit(1)
         
         # Build strategy parameters from command line arguments
         strategy_params = {}
