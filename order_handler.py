@@ -18,8 +18,19 @@ class OrderHandler:
         self.exchange = exchange
         self.info = info
         self.wallet_address = None
-        self.logger = logging.getLogger(__name__)
         self.api_connector = None
+        self.logger = logging.getLogger(__name__)
+
+    def _check_connection(self):
+        """Check if we have a valid exchange connection"""
+        if not self.exchange or not self.info:
+            if self.api_connector and self.api_connector.exchange:
+                self.exchange = self.api_connector.exchange
+                self.info = self.api_connector.info
+            else:
+                self.logger.error("Not connected to exchange")
+                return False
+        return True
 
     # =================================Spot Trading==============================================
     def market_buy(self, symbol: str, size: float, slippage: float = 0.05) -> Dict[str, Any]:
@@ -34,7 +45,7 @@ class OrderHandler:
         Returns:
             Order response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -65,7 +76,7 @@ class OrderHandler:
         Returns:
             Order response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -96,7 +107,7 @@ class OrderHandler:
         Returns:
             Order response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -125,7 +136,7 @@ class OrderHandler:
         Returns:
             Order response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -282,7 +293,7 @@ class OrderHandler:
         Returns:
             Dict containing status and order responses
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
         
         try:
@@ -454,7 +465,7 @@ class OrderHandler:
         Returns:
             Dict containing status and order responses
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -485,7 +496,7 @@ class OrderHandler:
         Returns:
             Order response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -520,7 +531,7 @@ class OrderHandler:
         Returns:
             Order response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -555,7 +566,7 @@ class OrderHandler:
         Returns:
             Order response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -588,7 +599,7 @@ class OrderHandler:
         Returns:
             Order response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -632,7 +643,7 @@ class OrderHandler:
         Returns:
             Response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -654,7 +665,7 @@ class OrderHandler:
         Returns:
             Cancellation response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -680,7 +691,7 @@ class OrderHandler:
         Returns:
             Dictionary with cancellation results
         """
-        if not self.exchange or not self.info or not self.wallet_address:
+        if not self._check_connection() or not self.info or not self.wallet_address:
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -741,7 +752,7 @@ class OrderHandler:
         Returns:
             Order response dictionary
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:
@@ -776,7 +787,7 @@ class OrderHandler:
         Returns:
             Dictionary with order result and order ID if successful
         """
-        if not self.exchange:
+        if not self._check_connection():
             return {"status": "error", "message": "Not connected to exchange"}
             
         try:

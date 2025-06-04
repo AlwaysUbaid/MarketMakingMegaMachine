@@ -15,58 +15,42 @@ class TradingStrategy:
     STRATEGY_PARAMS = {}  # Default parameters
     
     def __init__(self, api_connector, order_handler, config_manager, params=None):
-        """
-        Initialize the strategy
-        
-        Args:
-            api_connector: The API connector to use
-            order_handler: The order handler to execute trades
-            config_manager: The configuration manager
-            params: Custom parameters for the strategy
-        """
+        """Initialize the strategy with required components"""
         self.api_connector = api_connector
         self.order_handler = order_handler
         self.config_manager = config_manager
-        self.logger = logging.getLogger(__name__)
+        self.params = params or {}
         self.running = False
         self.stop_requested = False
-        
-        # Merge default params with custom params
-        self.params = self.STRATEGY_PARAMS.copy()
-        if params:
-            self.params.update(params)
+        self.logger = logging.getLogger(self.__class__.__name__)
     
     def start(self):
         """Start the strategy"""
-        self.running = True
-        self.stop_requested = False
-        self.logger.info(f"Starting {self.STRATEGY_NAME}")
-        self._run_strategy()
+        if not self.running:
+            self.running = True
+            self.stop_requested = False
+            self._run_strategy()
     
     def stop(self):
         """Stop the strategy"""
-        self.logger.info(f"Stopping {self.STRATEGY_NAME}")
         self.stop_requested = True
         self.running = False
     
     def is_running(self):
-        """Check if the strategy is running"""
+        """Check if strategy is running"""
         return self.running
     
     def _run_strategy(self):
-        """
-        Main strategy logic - to be implemented by subclasses
-        This method should include a loop that checks self.stop_requested
-        """
-        raise NotImplementedError("Subclasses must implement _run_strategy()")
+        """Main strategy execution loop - to be implemented by subclasses"""
+        raise NotImplementedError("Strategy must implement _run_strategy method")
     
     @classmethod
     def get_strategy_info(cls):
-        """Get strategy metadata"""
+        """Get strategy metadata and parameters"""
         return {
             "name": cls.STRATEGY_NAME,
             "description": cls.STRATEGY_DESCRIPTION,
-            "params": cls.STRATEGY_PARAMS
+            "parameters": cls.STRATEGY_PARAMS
         }
 
 
@@ -275,4 +259,15 @@ class StrategySelector:
             "name": strategy.STRATEGY_NAME,
             "running": strategy.is_running(),
             "params": self.active_strategy["params"]
-        } 
+        }
+
+    def is_running(self):
+        """
+        Check if any strategy is currently running
+        
+        Returns:
+            bool: True if a strategy is running, False otherwise
+        """
+        if not self.active_strategy:
+            return False
+        return self.active_strategy["instance"].is_running() 

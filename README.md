@@ -24,6 +24,8 @@ A professional, streamlined trading platform for the HyperLiquid exchange, focus
 - 💰 View balances and positions with a single command
 - 📊 Execute spot and perpetual market/limit orders 
 - 📈 Specialized for market making with intelligent order placement
+- 🚨 Emergency order cancellation and auto-cancellation features
+- 📊 Comprehensive monitoring and alerting system
 
 ## Quick Setup
 
@@ -31,24 +33,155 @@ A professional, streamlined trading platform for the HyperLiquid exchange, focus
    ```bash
    git clone https://github.com/AlwaysUbaid/MarketMakingMegaMachine.git
    cd MarketMakingMegaMachine
-   pip install -r requirements.txt
+   chmod +x install.sh
+   sudo ./install.sh
    ```
 
 2. **Configure:**
-   Create `dontshareconfig.py` with your API credentials:
+   Create `.env` with your API credentials:
    ```python
    # Mainnet account credentials
-   mainnet_wallet = ""  # Your mainnet wallet address
-   mainnet_secret = ""  # Your mainnet private key
-   # Testnet account credentials
-   testnet_wallet = ""  # Your testnet wallet address
-   testnet_secret = ""  # Your testnet private key
+   WALLET_ADDRESS = ""  # Your mainnet wallet address
+   WALLET_SECRET = ""  # Your mainnet wallet secret
    ```
 
 3. **Run:**
    ```bash
-   python main.py
+   # Start the main service
+   sudo systemctl start mmmm
+   
+   # Start the monitoring service
+   sudo systemctl start mmmm-monitor
    ```
+
+## Development Setup
+
+1. **Create and activate virtual environment:**
+   ```bash
+   # Create virtual environment
+   python3 -m venv venv
+   
+   # Activate virtual environment
+   # On macOS/Linux:
+   source venv/bin/activate
+   # On Windows:
+   .\venv\Scripts\activate
+   ```
+
+2. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. **Configure environment variables:**
+   ```bash
+   # Copy example environment file
+   cp example.env .env
+   
+   # Edit .env with your credentials
+   nano .env  # or use your preferred editor
+   ```
+
+4. **Verify installation:**
+   ```bash
+   # Run with verbose logging
+   python main.py -v
+   
+   # Test emergency cancel-all
+   python main.py -ca
+   ```
+
+## Command-Line Usage
+
+You can run strategies directly from the command line:
+
+```bash
+# Basic usage
+python main.py -s ubtc_mm
+
+# With testnet
+python main.py -s ueth_mm -t
+
+# With custom parameters
+python main.py -s pure_mm --strategy-params '{"bid_spread": 0.001, "ask_spread": 0.001, "order_amount": 0.1}'
+
+# With verbose logging
+python main.py -s buddy_mm -v
+
+# Emergency cancel all orders
+python main.py -ca
+```
+
+Available strategies:
+- `ubtc_mm`: UBTC market making
+- `ueth_mm`: UETH market making
+- `pure_mm`: Pure market making
+- `buddy_mm`: Buddy market making
+- `usol_mm`: USOL market making
+- `ufart_mm`: UFART market making
+
+## Emergency Features
+
+### Auto-Cancellation
+
+The platform includes automatic order cancellation in response to:
+- Insufficient balance errors
+- System errors
+- Network issues
+
+Auto-cancellation is implemented across all strategy files:
+- `ubtc_mm.py`
+- `ueth_mm.py`
+- `usol_mm.py`
+- `ufart_mm.py`
+- `pure_mm.py`
+- `buddy_mm.py`
+
+### Emergency Commands
+
+1. **Cancel All Orders:**
+   ```bash
+   # Basic usage
+   mmmm-cancel-all
+   
+   # With verbose logging
+   mmmm-cancel-all -v
+   
+   # On testnet
+   mmmm-cancel-all -t
+   ```
+
+2. **Check Status:**
+   ```bash
+   # View service status
+   sudo systemctl status mmmm
+   
+   # View monitoring status
+   sudo systemctl status mmmm-monitor
+   ```
+
+3. **View Logs:**
+   ```bash
+   # Main service logs
+   tail -f /var/log/mmmm/mmmm.log
+   
+   # Monitoring logs
+   tail -f /var/log/mmmm/mmmm-monitor.log
+   ```
+
+## Monitoring and Alerts
+
+The platform includes a comprehensive monitoring system that:
+- Tracks auto-cancellation events
+- Monitors error patterns
+- Sends email alerts for critical events
+- Maintains detailed logs
+
+Configure alerts in `/usr/local/bin/mmmm-monitor`:
+```bash
+# Edit the ALERT_EMAIL variable
+ALERT_EMAIL="your-email@example.com"
+```
 
 ## Basic Command Reference
 
@@ -181,6 +314,8 @@ cancel_all [symbol]
 - 🚀 Renamed to "MMMM — Market Making Mega Machine" to reflect the specialized focus
 - 🔄 Streamlined command set focusing on essential trading and market making functionality
 - 📈 Optimized for professional market makers with direct access to key commands
+- 🚨 Added emergency features and auto-cancellation
+- 📊 Enhanced monitoring and alerting system
 
 ---
 

@@ -390,13 +390,6 @@ class UbtcMarketMaking(TradingStrategy):
         """Main strategy execution loop"""
         self.set_status("Starting market making strategy")
         
-        # Verify exchange connection
-        if not self.api_connector.exchange or not self.order_handler.exchange:
-            self.set_status("Error: Exchange connection is not active. Please connect first.")
-            self.logger.error("Exchange connection not active when starting strategy")
-            self.running = False
-            return
-        
         # Set leverage if using perpetual
         if self.is_perp and self.leverage > 1:
             try:
