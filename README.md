@@ -318,7 +318,3 @@ cancel_all [symbol]
 - 📊 Enhanced monitoring and alerting system
 
 ---
-
-<p align="center">
-  <sub>Built by a Vibe Coder,lol</sub>
-</p>
