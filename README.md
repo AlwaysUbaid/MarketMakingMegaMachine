@@ -1,4 +1,4 @@
-# MMMM — Market Making Mega Machine
+# MMMM — Market Making Mega Machine API
 
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -16,309 +16,264 @@
 ═══════════════════════════════════════════
 ```
 
-A professional, streamlined trading platform for the HyperLiquid exchange, focusing on efficient market making with a clean interface.
+A professional, cloud-ready API for algorithmic trading and market making on HyperLiquid.
 
-## Core Features
+---
 
-- 🔄 Connect to HyperLiquid mainnet/testnet with ease
-- 💰 View balances and positions with a single command
-- 📊 Execute spot and perpetual market/limit orders 
-- 📈 Specialized for market making with intelligent order placement
-- 🚨 Emergency order cancellation and auto-cancellation features
-- 📊 Comprehensive monitoring and alerting system
+## Table of Contents
 
-## Quick Setup
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [API Overview](#api-overview)
+- [Authentication](#authentication)
+- [Endpoints](#endpoints)
+  - [Account](#account)
+  - [Order](#order)
+  - [Strategy](#strategy)
+- [Example Usage](#example-usage)
+- [Deployment](#deployment)
+- [Contributing](#contributing)
+- [License](#license)
 
-1. **Install:**
+---
+
+## Features
+
+- 🔄 Connect to HyperLiquid mainnet/testnet via API
+- 💰 Query balances, positions, and open orders
+- 🛒 Place/cancel spot and perpetual orders
+- 🤖 Start/stop/manage market making strategies
+- 🚨 Emergency cancel-all and auto-cancellation
+- 📊 Designed for integration with web frontends and SaaS platforms
+
+---
+
+## Quick Start
+
+1. **Clone and install dependencies:**
    ```bash
    git clone https://github.com/AlwaysUbaid/MarketMakingMegaMachine.git
    cd MarketMakingMegaMachine
-   chmod +x install.sh
-   sudo ./install.sh
-   ```
-
-2. **Configure:**
-   Create `.env` with your API credentials:
-   ```python
-   # Mainnet account credentials
-   WALLET_ADDRESS = ""  # Your mainnet wallet address
-   WALLET_SECRET = ""  # Your mainnet wallet secret
-   ```
-
-3. **Run:**
-   ```bash
-   # Start the main service
-   sudo systemctl start mmmm
-   
-   # Start the monitoring service
-   sudo systemctl start mmmm-monitor
-   ```
-
-## Development Setup
-
-1. **Create and activate virtual environment:**
-   ```bash
-   # Create virtual environment
-   python3 -m venv venv
-   
-   # Activate virtual environment
-   # On macOS/Linux:
-   source venv/bin/activate
-   # On Windows:
-   .\venv\Scripts\activate
-   ```
-
-2. **Install dependencies:**
-   ```bash
    pip install -r requirements.txt
    ```
 
-3. **Configure environment variables:**
+2. **Run the API server:**
    ```bash
-   # Copy example environment file
-   cp example.env .env
-   
-   # Edit .env with your credentials
-   nano .env  # or use your preferred editor
+   python api.py
    ```
+   The API will be available at `http://localhost:8000`.
 
-4. **Verify installation:**
-   ```bash
-   # Run with verbose logging
-   python main.py -v
-   
-   # Test emergency cancel-all
-   python main.py -ca
-   ```
+3. **Interactive docs:**  
+   Visit [http://localhost:8000/docs](http://localhost:8000/docs) for Swagger UI.
 
-## Command-Line Usage
+---
 
-You can run strategies directly from the command line:
+## API Overview
 
-```bash
-# Basic usage
-python main.py -s ubtc_mm
+All endpoints are grouped and RESTful.  
+**Base URL:** `http://localhost:8000`
 
-# With testnet
-python main.py -s ueth_mm -t
+### Authentication
 
-# With custom parameters
-python main.py -s pure_mm --strategy-params '{"bid_spread": 0.001, "ask_spread": 0.001, "order_amount": 0.1}'
+- **Connect to the exchange** (required before other actions):
 
-# With verbose logging
-python main.py -s buddy_mm -v
+  **POST** `/connect`
+  ```json
+  {
+    "wallet_address": "0x...",
+    "wallet_secret": "your_private_key",
+    "use_testnet": false
+  }
+  ```
+  **Response:**
+  ```json
+  { "status": "success", "message": "Connected to exchange" }
+  ```
 
-# Emergency cancel all orders
-python main.py -ca
+---
+
+## Endpoints
+
+### Account
+
+- **GET `/balances`**  
+  Get all balances (spot and perp).
+  ```json
+  {
+    "status": "success",
+    "data": {
+      "spot": [
+        { "asset": "UBTC", "available": 0.1, "total": 0.1, "in_orders": 0.0 }
+      ],
+      "perp": {
+        "account_value": 1000.0,
+        "margin_used": 100.0,
+        "position_value": 0.0
+      }
+    }
+  }
+  ```
+
+- **GET `/positions`**  
+  Get all open positions.
+  ```json
+  {
+    "status": "success",
+    "data": [
+      {
+        "symbol": "UBTC",
+        "size": 0.01,
+        "entry_price": 30000.0,
+        "mark_price": 30100.0,
+        "liquidation_price": 25000.0,
+        "unrealized_pnl": 10.0,
+        "margin_used": 50.0
+      }
+    ]
+  }
+  ```
+
+---
+
+### Order
+
+- **GET `/orders?symbol=UBTC`**  
+  List open orders (optionally filter by symbol).
+
+- **POST `/orders/market`**  
+  Place a market order.
+  ```json
+  {
+    "symbol": "UBTC",
+    "size": 0.01,
+    "order_type": "buy",  // or "sell"
+    "slippage": 0.05
+  }
+  ```
+  **Response:**  
+  Returns order execution result from the exchange.
+
+- **POST `/orders/limit`**  
+  Place a limit order.
+  ```json
+  {
+    "symbol": "UBTC",
+    "size": 0.01,
+    "price": 30000,
+    "order_type": "buy"  // or "sell"
+  }
+  ```
+
+- **DELETE `/orders/{symbol}/{order_id}`**  
+  Cancel a specific order.
+
+- **DELETE `/orders?symbol=UBTC`**  
+  Cancel all orders (optionally filter by symbol).
+
+---
+
+### Strategy
+
+- **GET `/strategies`**  
+  List available strategies.
+  ```json
+  {
+    "status": "success",
+    "data": [
+      { "module": "pure_mm", "name": "Pure Market Making", "description": "..." }
+    ]
+  }
+  ```
+
+- **GET `/strategies/{strategy_name}/params`**  
+  Get parameters for a strategy.
+
+- **POST `/strategies/{strategy_name}/start`**  
+  Start a strategy.
+  ```json
+  {
+    "params": {
+      "symbol": "UBTC/USDC",
+      "bid_spread": 0.001,
+      "ask_spread": 0.001,
+      "order_amount": 0.01,
+      "refresh_time": 10,
+      "is_perp": false,
+      "leverage": 1
+    }
+  }
+  ```
+  **Response:**
+  ```json
+  { "status": "success", "message": "Started strategy: pure_mm" }
+  ```
+
+- **POST `/strategies/stop`**  
+  Stop the currently running strategy.
+
+- **GET `/strategies/status`**  
+  Get the status of the currently running strategy.
+
+---
+
+## Example Usage
+
+**Connect and start a strategy (Python):**
+```python
+import requests
+
+# Connect
+r = requests.post("http://localhost:8000/connect", json={
+    "wallet_address": "...",
+    "wallet_secret": "...",
+    "use_testnet": False
+})
+print(r.json())
+
+# Start a strategy
+r = requests.post("http://localhost:8000/strategies/pure_mm/start", json={
+    "params": {
+        "symbol": "UBTC/USDC",
+        "bid_spread": 0.001,
+        "ask_spread": 0.001,
+        "order_amount": 0.01,
+        "refresh_time": 10,
+        "is_perp": False,
+        "leverage": 1
+    }
+})
+print(r.json())
 ```
 
-Available strategies:
-- `ubtc_mm`: UBTC market making
-- `ueth_mm`: UETH market making
-- `pure_mm`: Pure market making
-- `buddy_mm`: Buddy market making
-- `usol_mm`: USOL market making
-- `ufart_mm`: UFART market making
+---
 
-## Emergency Features
+## Deployment
 
-### Auto-Cancellation
+- **Production:** Use a process manager (e.g., systemd, pm2) and a reverse proxy (e.g., Nginx).
+- **Cloud:** Deploy on any cloud VM or container platform. Expose port 8000 or use a custom domain.
+- **Security:** Protect `/connect` and trading endpoints with authentication in production.
 
-The platform includes automatic order cancellation in response to:
-- Insufficient balance errors
-- System errors
-- Network issues
+---
 
-Auto-cancellation is implemented across all strategy files:
-- `ubtc_mm.py`
-- `ueth_mm.py`
-- `usol_mm.py`
-- `ufart_mm.py`
-- `pure_mm.py`
-- `buddy_mm.py`
+## Contributing
 
-### Emergency Commands
+Pull requests and issues are welcome!  
+Please open an issue to discuss your feature or bugfix idea.
 
-1. **Cancel All Orders:**
-   ```bash
-   # Basic usage
-   mmmm-cancel-all
-   
-   # With verbose logging
-   mmmm-cancel-all -v
-   
-   # On testnet
-   mmmm-cancel-all -t
-   ```
+---
 
-2. **Check Status:**
-   ```bash
-   # View service status
-   sudo systemctl status mmmm
-   
-   # View monitoring status
-   sudo systemctl status mmmm-monitor
-   ```
+## License
 
-3. **View Logs:**
-   ```bash
-   # Main service logs
-   tail -f /var/log/mmmm/mmmm.log
-   
-   # Monitoring logs
-   tail -f /var/log/mmmm/mmmm-monitor.log
-   ```
-
-## Monitoring and Alerts
-
-The platform includes a comprehensive monitoring system that:
-- Tracks auto-cancellation events
-- Monitors error patterns
-- Sends email alerts for critical events
-- Maintains detailed logs
-
-Configure alerts in `/usr/local/bin/mmmm-monitor`:
-```bash
-# Edit the ALERT_EMAIL variable
-ALERT_EMAIL="your-email@example.com"
-```
-
-## Basic Command Reference
-
-- `connect [mainnet|testnet]` - Connect to HyperLiquid
-- `balance` - Show balances
-- `positions` - Show open positions
-- `orders [symbol]` - List open orders
-
-### Spot Trading
-```
-buy <symbol> <quantity> [slippage]
-sell <symbol> <quantity> [slippage]
-limit_buy <symbol> <quantity> <price>
-limit_sell <symbol> <quantity> <price>
-```
-
-### Perpetual Trading
-```
-perp_buy <symbol> <size> [leverage] [slippage]
-perp_sell <symbol> <size> [leverage] [slippage]
-perp_limit_buy <symbol> <size> <price> [leverage]
-perp_limit_sell <symbol> <size> <price> [leverage]
-close_position <symbol> [slippage]
-set_leverage <symbol> <leverage>
-```
-
-## Market Making Guide
-
-MMMM offers a powerful, focused market making strategy that places and manages orders around the current market price to capture the spread.
-
-### Setting Up Market Making
-
-1. **Connect to the exchange:**
-   ```
-   >>> connect mainnet  # or connect testnet
-   Successfully connected to 0xb92e5A...
-   ```
-
-2. **Launch the market making strategy:**
-   ```
-   >>> select_strategy pure_mm
-   ```
-
-3. **Configure parameters:**
-
-   | Parameter | Description | Default | Recommended Range |
-   |-----------|-------------|---------|------------------|
-   | symbol | Trading pair symbol | BTC | Any supported pair |
-   | bid_spread | Percentage below mid price for buys | 0.0005 (0.05%) | 0.0005-0.005 |
-   | ask_spread | Percentage above mid price for sells | 0.0005 (0.05%) | 0.0005-0.005 |
-   | order_amount | Size of each order | 0.001 | Depends on asset |
-   | refresh_time | Seconds between order refreshes | 30 | 10-60 |
-   | is_perp | Trade perpetual contracts | False | True/False |
-   | leverage | Leverage for perpetuals | 1 | 1-5 for beginners |
-
-   Example configuration:
-   ```
-   symbol (Trading pair symbol) [BTC]: ETH
-   bid_spread (Spread below mid price for buy orders (as a decimal)) [0.0005]: 0.001
-   ask_spread (Spread above mid price for sell orders (as a decimal)) [0.0005]: 0.001
-   order_amount (Size of each order) [0.001]: 0.01
-   refresh_time (Time in seconds between order refresh) [30]: 20
-   is_perp (Whether to trade perpetual contracts (True) or spot (False)) [False]: True
-   leverage (Leverage to use for perpetual trading (if is_perp is True)) [1]: 2
-   ```
-
-4. **Monitor strategy performance:**
-   ```
-   >>> strategy_status
-   === Active Strategy: Pure Market Making ===
-   Module: pure_mm
-   Status: Running
-   Current state: Placed orders around mid price 3256.75
-   Performance Metrics:
-     symbol: ETH
-     mid_price: 3256.75
-     bid_price: 3253.49
-     ask_price: 3260.01
-     has_buy_order: True
-     has_sell_order: True
-     last_refresh: 2025-05-09 15:21:33
-   ```
-
-5. **Stop the strategy when desired:**
-   ```
-   >>> stop_strategy
-   Stopping strategy: Pure Market Making
-   Strategy stopped successfully.
-   ```
-
-### Market Making Tips
-
-- **Appropriate Spreads**: Start with wider spreads (0.1-0.3%) and narrow them as you gain confidence
-- **Order Size**: Keep orders small relative to your balance (1-5% of your portfolio per pair)
-- **Asset Selection**: Choose assets with:
-  - Higher volatility (for wider spreads)
-  - Higher trading volume (for more fill opportunities)
-  - Lower trading fees (to maximize profit margins)
-- **Risk Management**:
-  - Monitor your positions regularly
-  - Use `stop_strategy` during high market volatility
-  - Set reasonable leverage (1-3x) when using perpetuals
-- **Performance Tracking**: Use `strategy_status` regularly to monitor performance
-
-## Strategy Trading Commands
-
-```
-select_strategy [strategy_name]  - Select and configure a trading strategy
-strategy_status                  - Check the status of the current strategy
-stop_strategy                    - Stop the currently running strategy
-strategy_params [strategy_name]  - View parameters of a strategy
-help_strategies                  - Show help for trading strategies
-```
-
-### Order Management
-```
-cancel <symbol> <order_id>
-cancel_all [symbol]
-```
-
-## Help Commands
-- `help` - Display available commands
-- `help_strategies` - Trading strategy help
-- `clear` - Clear screen
-- `exit` - Exit application
-
-## Interface Changes in v2.0.0
-
-- 🎨 Redesigned interface with a cleaner, more focused experience
-- 🚀 Renamed to "MMMM — Market Making Mega Machine" to reflect the specialized focus
-- 🔄 Streamlined command set focusing on essential trading and market making functionality
-- 📈 Optimized for professional market makers with direct access to key commands
-- 🚨 Added emergency features and auto-cancellation
-- 📊 Enhanced monitoring and alerting system
+MIT License
 
 ---
 
 <p align="center">
-  <sub>Built by a Vibe Coder,lol</sub>
+  <sub>Built by a Vibe Coder, lol</sub>
 </p>
+
+---
+
+**For full API details, see the [Swagger UI](http://localhost:8000/docs) after running the server.**
+
+---
