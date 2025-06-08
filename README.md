@@ -210,9 +210,40 @@ All endpoints are grouped and RESTful.
 
 - **POST `/strategies/stop`**  
   Stop the currently running strategy.
+  
+  **Request:**
+  ```json
+  {}
+  ```
+  **Response:**
+  ```json
+  { "status": "success", "message": "Strategy stopped" }
+  ```
 
 - **GET `/strategies/status`**  
   Get the status of the currently running strategy.
+  
+  **Response:**
+  ```json
+  {
+    "status": "success",
+    "data": {
+      "module": "pip_mm",
+      "name": "PIP Market Making",
+      "running": true,
+      "params": {
+        "symbol": "PIP/USDC",
+        "bid_spread": 0.00011,
+        "ask_spread": 0.00012,
+        "order_amount": 0.55,
+        "refresh_time": 10,
+        "order_max_age": 30,
+        "is_perp": false,
+        "leverage": 1
+      }
+    }
+  }
+  ```
 
 ---
 
