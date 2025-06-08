@@ -213,35 +213,41 @@ All endpoints are grouped and RESTful.
   
   **Request:**
   ```json
-  {}
+  {
+    "stop": true,
+    "user_id": "frontend-user-123",   // optional
+    "reason": "manual stop from UI"    // optional
+  }
   ```
-  **Response:**
-  ```json
-  { "status": "success", "message": "Strategy stopped" }
-  ```
-
-- **GET `/strategies/status`**  
-  Get the status of the currently running strategy.
-  
   **Response:**
   ```json
   {
-    "status": "success",
-    "data": {
-      "module": "pip_mm",
-      "name": "PIP Market Making",
-      "running": true,
-      "params": {
-        "symbol": "PIP/USDC",
-        "bid_spread": 0.00011,
-        "ask_spread": 0.00012,
-        "order_amount": 0.55,
-        "refresh_time": 10,
-        "order_max_age": 30,
-        "is_perp": false,
-        "leverage": 1
-      }
-    }
+      "volume_made": 0.0,
+      "start_time": null,
+      "end_time": "2024-06-09T12:34:56.789Z",
+      "pnl": 0.0,
+      "isActive": false
+  }
+  ```
+
+- **POST `/strategies/status`**  
+  Get the status of the currently running strategy.
+  
+  **Request:**
+  ```json
+  {
+    "status": true,
+    "user_id": "frontend-user-123"   // optional
+  }
+  ```
+  **Response:**
+  ```json
+  {
+      "volume_made": 12345.67,
+      "start_time": "2024-06-09T12:34:56.789Z",
+      "end_time": null,
+      "pnl": 42.0,
+      "isActive": true
   }
   ```
 

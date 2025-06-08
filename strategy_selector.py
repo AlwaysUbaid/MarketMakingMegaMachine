@@ -254,11 +254,19 @@ class StrategySelector:
             return None
         
         strategy = self.active_strategy["instance"]
+        status_fields = {}
+        if hasattr(strategy, "get_status_fields"):
+            status_fields = strategy.get_status_fields()
+        perf_metrics = {}
+        if hasattr(strategy, "get_performance_metrics"):
+            perf_metrics = strategy.get_performance_metrics()
         return {
             "module": self.active_strategy["module"],
             "name": strategy.STRATEGY_NAME,
             "running": strategy.is_running(),
-            "params": self.active_strategy["params"]
+            "params": self.active_strategy["params"],
+            **status_fields,
+            "performance": perf_metrics
         }
 
     def is_running(self):

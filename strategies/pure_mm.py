@@ -109,6 +109,9 @@ class PureMarketMaking(TradingStrategy):
         # Extract asset name from symbol for balance lookup
         self.asset = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
         
+        self.start_time = None
+        self.end_time = None
+        
     def _get_param_value(self, param_name):
         """Helper method to extract parameter values"""
         if param_name in self.params:
@@ -688,6 +691,8 @@ class PureMarketMaking(TradingStrategy):
                 "last_update": datetime.fromtimestamp(self.last_tick_time).strftime("%Y-%m-%d %H:%M:%S") if self.last_tick_time else "Never"
             }
             
+            # Add status fields
+            metrics.update(self.get_status_fields())
             return metrics
             
         except Exception as e:
@@ -725,3 +730,33 @@ class PureMarketMaking(TradingStrategy):
         self._cancel_active_orders()
         self.running = False
         self.set_status("Instance cleaned up")
+
+    def start(self):
+        if not self.running:
+            self.start_time = time.time()
+            self.end_time = None
+            self.running = True
+            self.stop_requested = False
+            self._run_strategy()
+
+    def stop(self):
+        self.stop_requested = True
+        self.running = False
+        self.end_time = time.time()
+
+    def get_status_fields(self):
+        """Return status fields: volume, start/end time, pnl for this session"""
+        from utils import load_fills_history, calculate_pnl_metrics
+        fills = load_fills_history()
+        # Filter fills for this symbol and session
+        start_ts = int(self.start_time * 1000) if self.start_time else 0
+        end_ts = int(self.end_time * 1000) if self.end_time else int(time.time() * 1000)
+        symbol = self.symbol.split("/")[0] if "/" in self.symbol else self.symbol
+        session_fills = [f for f in fills if f.get("coin") == symbol and start_ts <= f.get("time", 0) <= end_ts]
+        pnl_metrics = calculate_pnl_metrics(session_fills)
+        return {
+            "volume_made": pnl_metrics["total_volume"],
+            "start_time": datetime.fromtimestamp(self.start_time).isoformat() if self.start_time else None,
+            "end_time": datetime.fromtimestamp(self.end_time).isoformat() if self.end_time else None,
+            "pnl": pnl_metrics["total_pnl"]
+        }

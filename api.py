@@ -6,6 +6,7 @@ import uvicorn
 import logging
 from dotenv import load_dotenv
 import os
+from datetime import datetime
 
 from api_connector import ApiConnector
 from order_handler import OrderHandler
@@ -57,6 +58,16 @@ class OrderRequest(BaseModel):
     order_type: str = "limit"
     leverage: Optional[int] = None
     slippage: float = 0.05
+
+# Add explicit models for stop and status requests
+class StopStrategyRequest(BaseModel):
+    stop: bool
+    user_id: Optional[str] = None
+    reason: Optional[str] = None
+
+class StatusStrategyRequest(BaseModel):
+    status: bool
+    user_id: Optional[str] = None
 
 # Dependency to check if exchange is connected
 async def get_exchange():
@@ -198,23 +209,46 @@ async def start_strategy(
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/strategies/stop")
-async def stop_strategy(exchange = Depends(get_exchange)):
-    """Stop the currently running strategy"""
+async def stop_strategy(request: StopStrategyRequest):
+    if not request.stop:
+        raise HTTPException(status_code=400, detail="Missing or invalid 'stop' field")
     try:
         success = strategy_selector.stop_strategy()
         if success:
-            return {"status": "success", "message": "Strategy stopped"}
+            return {
+                "volume_made": 0.0,  # Reset volume when stopping
+                "start_time": None,  # Reset start time
+                "end_time": datetime.utcnow().isoformat() + "Z",  # Set end time to now
+                "pnl": 0.0,  # Reset PnL
+                "isActive": False  # Set active status to false
+            }
         else:
             raise HTTPException(status_code=400, detail="No active strategy to stop")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/strategies/status")
-async def get_strategy_status(exchange = Depends(get_exchange)):
-    """Get status of the currently running strategy"""
+@app.post("/strategies/status")
+async def get_strategy_status(request: StatusStrategyRequest):
+    if not request.status:
+        raise HTTPException(status_code=400, detail="Missing or invalid 'status' field")
     try:
         status = strategy_selector.get_active_strategy()
-        return {"status": "success", "data": status}
+        if not status:
+            return {
+                "volume_made": 0.0,
+                "start_time": None,
+                "end_time": None,
+                "pnl": 0.0,
+                "isActive": False
+            }
+        metrics = status.get("performance", {})
+        return {
+            "volume_made": metrics.get("volume_made", 0.0),
+            "start_time": metrics.get("start_time"),
+            "end_time": None,  # Only set when strategy is stopped
+            "pnl": metrics.get("pnl", 0.0),
+            "isActive": True
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
