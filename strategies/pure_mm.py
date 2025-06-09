@@ -222,6 +222,23 @@ class PureMarketMaking(TradingStrategy):
                 
         return False, None, "No resting order or specific error found in response"
     
+    def _get_size_decimals(self):
+        """Get the allowed number of decimals for the symbol from exchange metadata, fallback to 8."""
+        try:
+            if self.api_connector and self.api_connector.info:
+                meta = self.api_connector.info.meta()
+                for asset_info in meta.get("universe", []):
+                    if asset_info.get("name") == self.symbol:
+                        return asset_info.get("szDecimals", 8)
+        except Exception as e:
+            self.logger.warning(f"Could not fetch size decimals from metadata: {e}")
+        return 8
+
+    def _format_size(self, size):
+        """Format the order size to the allowed number of decimals."""
+        decimals = self._get_size_decimals()
+        return round(size, decimals)
+
     def _place_buy_order(self, market_data):
         """
         Place a buy order at an appropriate price
@@ -251,8 +268,8 @@ class PureMarketMaking(TradingStrategy):
             # Format price to valid tick size
             bid_price = self._format_price(bid_price, tick_size)
             
-            # Use exact order amount
-            buy_size = self.order_amount
+            # Use exact order amount, but format it
+            buy_size = self._format_size(self.order_amount)
             
             self.logger.info(f"Placing buy order: {buy_size} {self.symbol} @ {bid_price}")
             
@@ -299,6 +316,9 @@ class PureMarketMaking(TradingStrategy):
             
             # Calculate appropriate sell size based on available balance
             sell_size = min(self.order_amount, available_balance)
+            
+            # Format sell size
+            sell_size = self._format_size(sell_size)
             
             # Check if we have enough to sell
             if sell_size < 0.00001:  # Minimum size to avoid errors
