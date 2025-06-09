@@ -7,6 +7,7 @@ import argparse
 import json
 import time
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Import other modules
 from api_connector import ApiConnector
@@ -51,17 +52,12 @@ def auto_connect(api_connector, use_testnet=False):
     logger = logging.getLogger("mmmm")
     try:
         # Load credentials from environment variables
-        if use_testnet:
-            wallet_address = os.environ.get("TESTNET_WALLET")
-            secret_key = os.environ.get("TESTNET_SECRET")
-            network_name = "testnet"
-        else:
-            wallet_address = os.environ.get("MAINNET_WALLET")
-            secret_key = os.environ.get("MAINNET_SECRET")
-            network_name = "mainnet"
+        wallet_address = os.environ.get("WALLET_ADDRESS")
+        secret_key = os.environ.get("WALLET_SECRET")
+        network_name = "testnet" if use_testnet else "mainnet"
 
         if not wallet_address or not secret_key:
-            logger.error(f"Missing credentials for {network_name}. Please set the environment variables correctly in your .env file.")
+            logger.error(f"Missing credentials for {network_name}. Please set WALLET_ADDRESS and WALLET_SECRET in your .env file.")
             return False
 
         logger.info(f"Auto-connecting to Hyperliquid ({network_name})...")
@@ -180,4 +176,8 @@ def main():
 
 
 if __name__ == "__main__":
+    # Load environment variables
+    load_dotenv()
+    print("[DEBUG] WALLET_ADDRESS:", os.environ.get("WALLET_ADDRESS"))
+    print("[DEBUG] WALLET_SECRET:", os.environ.get("WALLET_SECRET"))
     main()

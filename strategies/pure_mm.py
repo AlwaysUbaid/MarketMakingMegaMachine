@@ -188,6 +188,11 @@ class PureMarketMaking(TradingStrategy):
             
         if result["status"] != "ok":
             error_msg = result.get("message", "Unknown error")
+            # Enhanced error-based auto-cancellation
+            if "Insufficient spot balance" in error_msg:
+                self.logger.error(f"strategy_selector - ERROR - Failed to place {side_str.lower()} order: Insufficient spot balance asset={self.asset}")
+                # Cancel all open orders for this symbol
+                self.order_handler.cancel_all_orders(self.symbol)
             return False, None, error_msg
             
         if "response" not in result or "data" not in result["response"] or "statuses" not in result["response"]["data"]:
@@ -198,6 +203,10 @@ class PureMarketMaking(TradingStrategy):
             if "error" in status:
                 error_msg = status["error"]
                 self.logger.error(f"{side_str} order error: {error_msg}")
+                # Enhanced error-based auto-cancellation
+                if "Insufficient spot balance" in error_msg:
+                    self.logger.error(f"strategy_selector - ERROR - Failed to place {side_str.lower()} order: Insufficient spot balance asset={self.asset}")
+                    self.order_handler.cancel_all_orders(self.symbol)
                 return False, None, error_msg
             
             if "resting" in status:
@@ -414,6 +423,7 @@ class PureMarketMaking(TradingStrategy):
                 (current_time - self.active_buy_order_time) > self.order_max_age:
                     self.logger.info(f"Buy order {self.active_buy_order_id} exceeded max age of {self.order_max_age}s, cancelling")
                     self.order_handler.cancel_order(self.symbol, self.active_buy_order_id)
+                    self.logger.info(f"strategy_selector - INFO - Auto-cancelled buy order {self.active_buy_order_id} for {self.symbol} due to order_max_age")
                     self.active_buy_order_id = None
                     self.active_buy_order_time = None
                     need_cancel_buy = True
@@ -423,6 +433,7 @@ class PureMarketMaking(TradingStrategy):
                 (current_time - self.active_sell_order_time) > self.order_max_age:
                     self.logger.info(f"Sell order {self.active_sell_order_id} exceeded max age of {self.order_max_age}s, cancelling")
                     self.order_handler.cancel_order(self.symbol, self.active_sell_order_id)
+                    self.logger.info(f"strategy_selector - INFO - Auto-cancelled sell order {self.active_sell_order_id} for {self.symbol} due to order_max_age")
                     self.active_sell_order_id = None
                     self.active_sell_order_time = None
                     need_cancel_sell = True
