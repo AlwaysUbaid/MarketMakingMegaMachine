@@ -47,33 +47,31 @@ def parse_arguments():
     return parser.parse_args()
 
 def auto_connect(api_connector, use_testnet=False):
-    """Automatically connect to the exchange"""
+    """Automatically connect to the exchange using .env variables"""
     logger = logging.getLogger("mmmm")
-    
     try:
-        # Import credentials from dontshareconfig.py
-        import dontshareconfig as ds
-        
-        # Select the appropriate credentials based on network
+        # Load credentials from environment variables
         if use_testnet:
-            wallet_address = ds.testnet_wallet
-            secret_key = ds.testnet_secret
+            wallet_address = os.environ.get("TESTNET_WALLET")
+            secret_key = os.environ.get("TESTNET_SECRET")
             network_name = "testnet"
         else:
-            wallet_address = ds.mainnet_wallet
-            secret_key = ds.mainnet_secret
+            wallet_address = os.environ.get("MAINNET_WALLET")
+            secret_key = os.environ.get("MAINNET_SECRET")
             network_name = "mainnet"
-        
+
+        if not wallet_address or not secret_key:
+            logger.error(f"Missing credentials for {network_name}. Please set the environment variables correctly in your .env file.")
+            return False
+
         logger.info(f"Auto-connecting to Hyperliquid ({network_name})...")
         success = api_connector.connect_hyperliquid(wallet_address, secret_key, use_testnet)
-        
         if success:
             logger.info(f"Successfully connected to {wallet_address}")
             return True
         else:
             logger.error("Failed to connect to exchange")
             return False
-            
     except Exception as e:
         logger.error(f"Error auto-connecting to exchange: {str(e)}")
         return False
