@@ -1,6 +1,7 @@
 import logging
 from typing import Dict, Optional, Any, List
 import hyperliquid
+import time
 
 import eth_account
 from eth_account.signers.local import LocalAccount
@@ -236,3 +237,105 @@ class ApiConnector:
         except Exception as e:
             self.logger.error(f"Error fetching trade history: {str(e)}")
             return []
+    
+    def get_candles(self, symbol: str, interval: str = "15m", start_time: Optional[int] = None, end_time: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Get candle data for a symbol
+        
+        Args:
+            symbol: Trading pair symbol
+            interval: Candle interval (e.g., "15m", "1h", "4h", "1d")
+            start_time: Start time in milliseconds (optional)
+            end_time: End time in milliseconds (optional)
+            
+        Returns:
+            List of candle data
+        """
+        if not self.info:
+            self.logger.error("Not connected to exchange")
+            return []
+            
+        try:
+            # Calculate end time if not provided (current time)
+            if not end_time:
+                end_time = int(time.time() * 1000)  # Current time in milliseconds
+            
+            # Calculate start time if not provided (one candle before end time)
+            if not start_time:
+                # Parse interval to milliseconds
+                interval_ms = self._parse_interval_to_ms(interval)
+                start_time = end_time - interval_ms
+            
+            # Prepare request body
+            req = {
+                "type": "candleSnapshot",
+                "req": {
+                    "coin": symbol.replace("-PERP", ""),  # Remove -PERP suffix if present
+                    "interval": interval,
+                    "startTime": start_time,
+                    "endTime": end_time
+                }
+            }
+            
+            # Make API request with proper headers
+            headers = {
+                "Content-Type": "application/json"
+            }
+            
+            # Use the info object's session to make the request
+            response = self.info.session.post(
+                f"{self.info.base_url}/info",
+                json=req,
+                headers=headers
+            )
+            
+            if response.status_code != 200:
+                self.logger.error(f"Error fetching candles: {response.status_code} - {response.text}")
+                return []
+                
+            data = response.json()
+            if not data or not isinstance(data, list):
+                self.logger.error(f"Invalid response format for candles: {data}")
+                return []
+                
+            # Format candles
+            candles = []
+            for candle in data:
+                try:
+                    candles.append({
+                        "timestamp": int(candle["t"]),
+                        "open": float(candle["o"]),
+                        "high": float(candle["h"]),
+                        "low": float(candle["l"]),
+                        "close": float(candle["c"]),
+                        "volume": float(candle["v"])
+                    })
+                except (KeyError, ValueError) as e:
+                    self.logger.warning(f"Error parsing candle data: {e}")
+                    continue
+                
+            return candles
+            
+        except Exception as e:
+            self.logger.error(f"Error fetching candles: {str(e)}")
+            return []
+            
+    def _parse_interval_to_ms(self, interval: str) -> int:
+        """Convert interval string to milliseconds"""
+        try:
+            unit = interval[-1]
+            value = int(interval[:-1])
+            
+            if unit == 's':
+                return value * 1000
+            elif unit == 'm':
+                return value * 60 * 1000
+            elif unit == 'h':
+                return value * 60 * 60 * 1000
+            elif unit == 'd':
+                return value * 24 * 60 * 60 * 1000
+            else:
+                raise ValueError(f"Invalid interval unit: {unit}")
+        except Exception as e:
+            self.logger.error(f"Error parsing interval: {str(e)}")
+            return 60000  # Default to 1 minute

@@ -4,6 +4,8 @@ import inspect
 import logging
 import time
 from typing import Dict, List, Any, Optional, Callable, Type
+from datetime import datetime
+from ohlcv_fetcher import OHLCVFetcher
 
 # Strategy base class that all strategies should inherit from
 class TradingStrategy:
@@ -22,7 +24,40 @@ class TradingStrategy:
         self.params = params or {}
         self.running = False
         self.stop_requested = False
+        self.status = "Initialized"
         self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # Initialize OHLCV fetcher
+        self.ohlcv_fetcher = OHLCVFetcher(api_connector)
+        self.last_ohlcv_log = 0
+        self.ohlcv_log_interval = 60  # Log OHLCV every 60 seconds
+    
+    def _log_ohlcv(self):
+        """Log current OHLCV data"""
+        try:
+            current_time = time.time()
+            if current_time - self.last_ohlcv_log < self.ohlcv_log_interval:
+                return
+                
+            if not self.ohlcv_fetcher:
+                self.ohlcv_fetcher = OHLCVFetcher(self.api_connector)
+            
+            # Get latest candle
+            latest = self.ohlcv_fetcher.get_latest_candle(self.symbol, "1m")
+            if latest:
+                self.logger.info(
+                    f"OHLCV Data for {self.symbol}:\n"
+                    f"Time: {datetime.fromtimestamp(latest.timestamp/1000)}\n"
+                    f"Open: {latest.open:.2f}\n"
+                    f"High: {latest.high:.2f}\n"
+                    f"Low: {latest.low:.2f}\n"
+                    f"Close: {latest.close:.2f}\n"
+                    f"Volume: {latest.volume:.4f}"
+                )
+                self.last_ohlcv_log = current_time
+                
+        except Exception as e:
+            self.logger.error(f"Error logging OHLCV data: {str(e)}")
     
     def start(self):
         """Start the strategy"""
