@@ -1,0 +1,12 @@
+{
+    "wallet_address": "",
+    "wallet_secret": "",
+    "use_testnet": false,
+    "strategies": {
+        "ema": {
+            "default_timeframe": "15m",
+            "default_ema_length": 20,
+            "default_order_size": 1.0
+        }
+    }
+} 

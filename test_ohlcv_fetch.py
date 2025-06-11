@@ -21,7 +21,7 @@ def fetch_ohlcv_data():
     payload = {
         "type": "candleSnapshot",
         "req": {
-            "coin": "@107",  # Using @107 as specified
+            "coin": "@59",  # Using @107 as specified
             "interval": "1h",  # 1 hour candles
             "startTime": start_time,
             "endTime": end_time

@@ -7,6 +7,10 @@ import argparse
 import json
 from pathlib import Path
 from dotenv import load_dotenv
+import time
+from datetime import datetime
+import pandas as pd
+import numpy as np
 
 # Import other modules
 from api_connector import ApiConnector
@@ -14,6 +18,7 @@ from order_handler import OrderHandler
 from config_manager import ConfigManager
 from terminal_ui import ElysiumTerminalUI
 from strategy_selector import StrategySelector
+from ohlcv_fetcher import OHLCVFetcher
 
 
 def setup_logging(log_level=logging.INFO, log_file=None):
@@ -48,6 +53,7 @@ def parse_arguments():
                         help='Strategy to run (e.g., ubtc_mm, ueth_mm, pure_mm, buddy_mm, usol_mm, ufart_mm)')
     parser.add_argument('--strategy-params', type=str,
                         help='JSON string of strategy parameters')
+    parser.add_argument('-ema', action='store_true', help='Run EMA strategy')
     
     return parser.parse_args()
 
@@ -78,6 +84,177 @@ def emergency_cancel_all(api_connector, order_handler):
     except Exception as e:
         logger.error(f"Error during emergency cancellation: {str(e)}")
         return False
+
+
+def calculate_ema(prices: pd.Series, length: int) -> pd.Series:
+    """Calculate EMA for given prices"""
+    return prices.ewm(span=length, adjust=False).mean()
+
+
+def run_ema_strategy(args):
+    """Run EMA strategy with given parameters"""
+    logger = logging.getLogger("elysium")
+    
+    try:
+        # Initialize components
+        api_connector = ApiConnector()
+        order_handler = OrderHandler(api_connector)
+        config_manager = ConfigManager()
+        
+        # Connect to exchange
+        wallet_address = config_manager.get_wallet_address()
+        secret_key = config_manager.get_wallet_secret()
+        
+        if not wallet_address or not secret_key:
+            logger.error("Wallet credentials not found. Please set them in config.json")
+            return
+        
+        logger.info("Connecting to Hyperliquid...")
+        if not api_connector.connect_hyperliquid(wallet_address, secret_key, False):
+            logger.error("Failed to connect to exchange")
+            return
+        
+        # Initialize OHLCV fetcher
+        ohlcv_fetcher = OHLCVFetcher(api_connector)
+        
+        # Get user inputs
+        symbol = input("Enter token symbol (e.g., HYPE): ").upper()
+        
+        print("\nAvailable timeframes:")
+        print("1. 1m (1 minute)")
+        print("2. 5m (5 minutes)")
+        print("3. 15m (15 minutes)")
+        print("4. 1h (1 hour)")
+        print("5. 4h (4 hours)")
+        print("6. 1d (1 day)")
+        
+        tf_choice = input("\nSelect timeframe (1-6): ")
+        timeframe_map = {
+            "1": "1m", "2": "5m", "3": "15m",
+            "4": "1h", "5": "4h", "6": "1d"
+        }
+        timeframe = timeframe_map.get(tf_choice)
+        
+        if not timeframe:
+            logger.error("Invalid timeframe selection")
+            return
+        
+        try:
+            ema_length = int(input("\nEnter EMA length (e.g., 20): "))
+            if ema_length <= 0:
+                raise ValueError("EMA length must be positive")
+        except ValueError as e:
+            logger.error(f"Invalid EMA length: {e}")
+            return
+        
+        try:
+            order_size = float(input("\nEnter order size in tokens: "))
+            if order_size <= 0:
+                raise ValueError("Order size must be positive")
+        except ValueError as e:
+            logger.error(f"Invalid order size: {e}")
+            return
+        
+        logger.info(f"\nStarting EMA strategy for {symbol}")
+        logger.info(f"Timeframe: {timeframe}")
+        logger.info(f"EMA Length: {ema_length}")
+        logger.info(f"Order Size: {order_size}")
+        
+        # Strategy state
+        in_position = False
+        position_side = None
+        entry_price = 0
+        
+        while True:
+            try:
+                # Get OHLCV data
+                ohlcv_data = ohlcv_fetcher.get_ohlcv(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    limit=ema_length * 3
+                )
+                
+                if not ohlcv_data:
+                    logger.warning("No OHLCV data available")
+                    time.sleep(5)
+                    continue
+                
+                # Convert to DataFrame
+                df = ohlcv_fetcher.to_dataframe(ohlcv_data)
+                
+                # Calculate EMA
+                ema = calculate_ema(df['close'], ema_length)
+                
+                # Get latest values
+                current_price = df['close'].iloc[-1]
+                current_ema = ema.iloc[-1]
+                previous_ema = ema.iloc[-2]
+                
+                # Generate trading signal
+                if not in_position:
+                    if current_price > current_ema and current_ema > previous_ema:
+                        # Buy signal
+                        logger.info(f"Buy signal: Price {current_price} crossed above EMA {current_ema}")
+                        result = order_handler.market_buy(symbol, order_size, 0.05)
+                        if result["status"] == "ok":
+                            in_position = True
+                            position_side = "long"
+                            entry_price = current_price
+                            logger.info(f"Entered long position at {entry_price}")
+                    elif current_price < current_ema and current_ema < previous_ema:
+                        # Sell signal
+                        logger.info(f"Sell signal: Price {current_price} crossed below EMA {current_ema}")
+                        result = order_handler.market_sell(symbol, order_size, 0.05)
+                        if result["status"] == "ok":
+                            in_position = True
+                            position_side = "short"
+                            entry_price = current_price
+                            logger.info(f"Entered short position at {entry_price}")
+                else:
+                    # Check for exit conditions
+                    if position_side == "long" and current_price <= current_ema:
+                        # Close long position
+                        logger.info(f"Exit signal: Price {current_price} touched EMA {current_ema}")
+                        result = order_handler.market_sell(symbol, order_size, 0.05)
+                        if result["status"] == "ok":
+                            profit = (current_price - entry_price) * order_size
+                            logger.info(f"Closed long position. Profit: {profit:.2f} USD")
+                            in_position = False
+                            position_side = None
+                    elif position_side == "short" and current_price >= current_ema:
+                        # Close short position
+                        logger.info(f"Exit signal: Price {current_price} touched EMA {current_ema}")
+                        result = order_handler.market_buy(symbol, order_size, 0.05)
+                        if result["status"] == "ok":
+                            profit = (entry_price - current_price) * order_size
+                            logger.info(f"Closed short position. Profit: {profit:.2f} USD")
+                            in_position = False
+                            position_side = None
+                
+                # Display current status
+                print(f"\rPrice: {current_price:.2f} | EMA: {current_ema:.2f} | Position: {position_side or 'None'}", end='')
+                
+                time.sleep(5)  # Wait before next iteration
+                
+            except KeyboardInterrupt:
+                logger.info("\nStopping EMA strategy...")
+                if in_position:
+                    logger.info("Closing open position...")
+                    if position_side == "long":
+                        order_handler.market_sell(symbol, order_size, 0.05)
+                    else:
+                        order_handler.market_buy(symbol, order_size, 0.05)
+                break
+            except Exception as e:
+                logger.error(f"Error in strategy loop: {e}")
+                time.sleep(5)
+        
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+    finally:
+        # Cleanup
+        if 'ohlcv_fetcher' in locals():
+            ohlcv_fetcher.cleanup()
 
 
 def main():
@@ -157,6 +334,10 @@ def main():
         # Create and start the CLI if no strategy specified
         terminal = ElysiumTerminalUI(api_connector, order_handler, config_manager)
         terminal.cmdloop()
+        
+        # If EMA strategy is specified, run it
+        if args.ema:
+            run_ema_strategy(args)
         
     except KeyboardInterrupt:
         logger.info("Shutting down due to keyboard interrupt")

@@ -8,6 +8,7 @@ import queue
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 import sys
+from strategies.ema_strategy import EMAStrategy, EMAStrategyConfig
 
 class ElysiumTerminalUI(cmd.Cmd):
     """Command-line interface for MMMM Trading Platform"""
@@ -72,6 +73,10 @@ class ElysiumTerminalUI(cmd.Cmd):
         # Initialize strategy selector
         from strategy_selector import StrategySelector
         self.strategy_selector = StrategySelector(api_connector, order_handler, config_manager)
+        
+        # Initialize strategies
+        self.ema_strategy = EMAStrategy(api_connector, order_handler, config_manager)
+        self.active_strategy = None
         
     def preloop(self):
         """Setup before starting the command loop"""
@@ -1037,3 +1042,140 @@ class ElysiumTerminalUI(cmd.Cmd):
         for strategy in strategies:
             print(f"  - {strategy['name']} ({strategy['module']})")
             print(f"    {strategy['description']}")
+
+    def show_strategy_menu(self):
+        """Show strategy selection menu"""
+        self.clear_screen()
+        print("\n=== Strategy Selection ===")
+        print("1. EMA Strategy")
+        print("2. Back to Main Menu")
+        
+        choice = input("\nSelect strategy (1-2): ")
+        
+        if choice == "1":
+            self.configure_ema_strategy()
+        elif choice == "2":
+            return
+        else:
+            print("Invalid choice. Please try again.")
+            time.sleep(1)
+            self.show_strategy_menu()
+    
+    def configure_ema_strategy(self):
+        """Configure and start EMA strategy"""
+        self.clear_screen()
+        print("\n=== EMA Strategy Configuration ===")
+        
+        # Get symbol
+        symbol = input("Enter token symbol (e.g., HYPE): ").upper()
+        
+        # Get timeframe
+        print("\nAvailable timeframes:")
+        print("1. 1m (1 minute)")
+        print("2. 5m (5 minutes)")
+        print("3. 15m (15 minutes)")
+        print("4. 1h (1 hour)")
+        print("5. 4h (4 hours)")
+        print("6. 1d (1 day)")
+        
+        tf_choice = input("\nSelect timeframe (1-6): ")
+        timeframe_map = {
+            "1": "1m", "2": "5m", "3": "15m",
+            "4": "1h", "5": "4h", "6": "1d"
+        }
+        timeframe = timeframe_map.get(tf_choice)
+        
+        if not timeframe:
+            print("Invalid timeframe selection")
+            time.sleep(1)
+            return
+        
+        # Get EMA length
+        try:
+            ema_length = int(input("\nEnter EMA length (e.g., 20): "))
+            if ema_length <= 0:
+                raise ValueError("EMA length must be positive")
+        except ValueError as e:
+            print(f"Invalid EMA length: {e}")
+            time.sleep(1)
+            return
+        
+        # Get order size
+        try:
+            order_size = float(input("\nEnter order size in tokens: "))
+            if order_size <= 0:
+                raise ValueError("Order size must be positive")
+        except ValueError as e:
+            print(f"Invalid order size: {e}")
+            time.sleep(1)
+            return
+        
+        # Create strategy config
+        config = EMAStrategyConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            ema_length=ema_length,
+            order_size=order_size
+        )
+        
+        # Start strategy
+        if self.ema_strategy.start(config):
+            self.active_strategy = "ema"
+            print("\nEMA strategy started successfully!")
+            print("\nPress Enter to continue...")
+            input()
+        else:
+            print("\nFailed to start EMA strategy")
+            time.sleep(1)
+    
+    def show_strategy_status(self):
+        """Show status of active strategy"""
+        self.clear_screen()
+        print("\n=== Strategy Status ===")
+        
+        if not self.active_strategy:
+            print("No active strategy")
+            print("\nPress Enter to continue...")
+            input()
+            return
+        
+        if self.active_strategy == "ema":
+            status = self.ema_strategy.get_status()
+            config = self.ema_strategy.get_config()
+            metrics = self.ema_strategy.get_performance_metrics()
+            
+            print(f"\nStrategy: EMA")
+            print(f"Status: {status['status']}")
+            print(f"Symbol: {config['symbol']}")
+            print(f"Timeframe: {config['timeframe']}")
+            print(f"EMA Length: {config['ema_length']}")
+            print(f"Order Size: {config['order_size']} tokens")
+            print(f"Last Signal: {status['last_signal'] or 'None'}")
+            print(f"Last Update: {status['last_update'] or 'Never'}")
+            print(f"Total Trades: {metrics['total_trades']}")
+            print(f"Win Rate: {metrics['win_rate']:.2f}%")
+            print(f"Average Profit: {metrics['avg_profit']:.2f} USD")
+        
+        print("\nPress Enter to continue...")
+        input()
+    
+    def stop_strategy(self):
+        """Stop active strategy"""
+        self.clear_screen()
+        print("\n=== Stop Strategy ===")
+        
+        if not self.active_strategy:
+            print("No active strategy to stop")
+            print("\nPress Enter to continue...")
+            input()
+            return
+        
+        if self.active_strategy == "ema":
+            if self.ema_strategy.stop():
+                self.active_strategy = None
+                print("\nEMA strategy stopped successfully!")
+            else:
+                print("\nFailed to stop EMA strategy")
+        
+        print("\nPress Enter to continue...")
+        input()
