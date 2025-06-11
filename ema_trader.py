@@ -73,16 +73,17 @@ def main():
         
         # Get token index
         token_index = get_token_index(symbol)
-        if token_index is None:
-            logger.error(f"Token {symbol} not found in token-list.txt")
-            return
-            
-        logger.info(f"Found token index: {token_index}")
         
-        # Ask if user wants to trade perpetuals
-        is_perp = input("\nDo you want to trade perpetuals? (y/n): ").lower() == 'y'
+        # If token not found, assume it's a perpetual trading attempt
+        if token_index is None:
+            logger.info(f"Token {symbol} not found in spot trading list. Assuming perpetual trading.")
+            is_perp = True
+        else:
+            logger.info(f"Found token index: {token_index}")
+            # Ask if user wants to trade perpetuals
+            is_perp = input("\nDo you want to trade perpetuals? (y/n): ").lower() == 'y'
+        
         if is_perp:
-            symbol = f"{symbol}-PERP"
             try:
                 leverage = int(input("\nEnter leverage (1-5): "))
                 if leverage < 1 or leverage > 5:
@@ -90,6 +91,9 @@ def main():
             except ValueError as e:
                 logger.error(f"Invalid leverage: {e}")
                 return
+        elif token_index is None:
+            logger.error(f"Token {symbol} not found in spot trading list and perpetual trading was not selected.")
+            return
         
         print("\nAvailable timeframes:")
         print("1. 1m (1 minute)")
@@ -126,7 +130,12 @@ def main():
             logger.error(f"Invalid order size: {e}")
             return
         
-        logger.info(f"\nStarting EMA strategy for {symbol} (Index: {token_index})")
+        # Set trading symbol based on trading type
+        trading_symbol = symbol if is_perp else f"@{token_index}"
+        
+        logger.info(f"\nStarting EMA strategy for {symbol}")
+        if not is_perp:
+            logger.info(f"Token Index: {token_index}")
         logger.info(f"Trading Type: {'Perpetual' if is_perp else 'Spot'}")
         if is_perp:
             logger.info(f"Leverage: {leverage}x")
@@ -143,9 +152,9 @@ def main():
         
         while True:
             try:
-                # Get OHLCV data using token index
+                # Get OHLCV data using token index or symbol
                 ohlcv_data = ohlcv_fetcher.get_ohlcv(
-                    symbol=f"@{token_index}",  # Use token index with @ prefix
+                    symbol=f"@{token_index}" if not is_perp else symbol,  # Use appropriate symbol format
                     timeframe=timeframe,
                     limit=ema_length * 3
                 )
@@ -172,9 +181,9 @@ def main():
                         # Buy signal
                         logger.info(f"Buy signal: Price {current_price} crossed above EMA {current_ema}")
                         if is_perp:
-                            result = order_handler.perp_market_buy(symbol, order_size, leverage, 0.05)
+                            result = order_handler.perp_market_buy(trading_symbol, order_size, leverage, 0.05)
                         else:
-                            result = order_handler.market_buy(symbol, order_size, 0.05)
+                            result = order_handler.market_buy(trading_symbol, order_size, 0.05)
                         if result["status"] == "ok":
                             in_position = True
                             position_side = "long"
@@ -184,9 +193,9 @@ def main():
                         # Sell signal
                         logger.info(f"Sell signal: Price {current_price} crossed below EMA {current_ema}")
                         if is_perp:
-                            result = order_handler.perp_market_sell(symbol, order_size, leverage, 0.05)
+                            result = order_handler.perp_market_sell(trading_symbol, order_size, leverage, 0.05)
                         else:
-                            result = order_handler.market_sell(symbol, order_size, 0.05)
+                            result = order_handler.market_sell(trading_symbol, order_size, 0.05)
                         if result["status"] == "ok":
                             in_position = True
                             position_side = "short"
@@ -198,9 +207,9 @@ def main():
                         # Close long position
                         logger.info(f"Exit signal: Price {current_price} touched EMA {current_ema}")
                         if is_perp:
-                            result = order_handler.perp_market_sell(symbol, order_size, leverage, 0.05)
+                            result = order_handler.perp_market_sell(trading_symbol, order_size, leverage, 0.05)
                         else:
-                            result = order_handler.market_sell(symbol, order_size, 0.05)
+                            result = order_handler.market_sell(trading_symbol, order_size, 0.05)
                         if result["status"] == "ok":
                             profit = (current_price - entry_price) * order_size
                             if is_perp:
@@ -215,9 +224,9 @@ def main():
                         # Close short position
                         logger.info(f"Exit signal: Price {current_price} touched EMA {current_ema}")
                         if is_perp:
-                            result = order_handler.perp_market_buy(symbol, order_size, leverage, 0.05)
+                            result = order_handler.perp_market_buy(trading_symbol, order_size, leverage, 0.05)
                         else:
-                            result = order_handler.market_buy(symbol, order_size, 0.05)
+                            result = order_handler.market_buy(trading_symbol, order_size, 0.05)
                         if result["status"] == "ok":
                             profit = (entry_price - current_price) * order_size
                             if is_perp:
@@ -240,14 +249,14 @@ def main():
                     logger.info("Closing open position...")
                     if position_side == "long":
                         if is_perp:
-                            order_handler.perp_market_sell(symbol, order_size, leverage, 0.05)
+                            order_handler.perp_market_sell(trading_symbol, order_size, leverage, 0.05)
                         else:
-                            order_handler.market_sell(symbol, order_size, 0.05)
+                            order_handler.market_sell(trading_symbol, order_size, 0.05)
                     else:
                         if is_perp:
-                            order_handler.perp_market_buy(symbol, order_size, leverage, 0.05)
+                            order_handler.perp_market_buy(trading_symbol, order_size, leverage, 0.05)
                         else:
-                            order_handler.market_buy(symbol, order_size, 0.05)
+                            order_handler.market_buy(trading_symbol, order_size, 0.05)
                 break
             except Exception as e:
                 logger.error(f"Error in strategy loop: {e}")
