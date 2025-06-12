@@ -16,13 +16,13 @@ class UsdhlMarketMaking(TradingStrategy):
     """
     USDHL Market Making Strategy
     
-    This strategy rapidly executes market orders for the USDHL/USDC pair,
-    focusing on volume rather than spread since it's a stablecoin pair.
+    This strategy places limit orders around the mid price for the USDHL/USDC pair,
+    with very tight spreads optimized for stablecoin trading.
     """
     
     # Strategy metadata
     STRATEGY_NAME = "USDHL Market Making"
-    STRATEGY_DESCRIPTION = "Rapid market order execution for stablecoin pair"
+    STRATEGY_DESCRIPTION = "Limit order market making for stablecoin pair with tight spreads"
     
     # Default parameters with descriptions
     STRATEGY_PARAMS = {
@@ -41,10 +41,15 @@ class UsdhlMarketMaking(TradingStrategy):
             "type": "int",
             "description": "Time in seconds between trades"
         },
-        "slippage": {
-            "value": 0.0001,  # 0.01% slippage tolerance
+        "bid_spread": {
+            "value": 0.00005,  # 0.005% below mid price
             "type": "float",
-            "description": "Maximum allowed slippage for market orders"
+            "description": "Spread below mid price for buy orders"
+        },
+        "ask_spread": {
+            "value": 0.00005,  # 0.005% above mid price
+            "type": "float",
+            "description": "Spread above mid price for sell orders"
         },
         "is_perp": {
             "value": False,
@@ -71,7 +76,8 @@ class UsdhlMarketMaking(TradingStrategy):
         # Extract parameter values
         self.order_amount = self._get_param_value("order_amount")
         self.refresh_time = self._get_param_value("refresh_time")
-        self.slippage = self._get_param_value("slippage")
+        self.bid_spread = self._get_param_value("bid_spread")
+        self.ask_spread = self._get_param_value("ask_spread")
         self.is_perp = self._get_param_value("is_perp")
         self.leverage = self._get_param_value("leverage")
         
@@ -84,6 +90,7 @@ class UsdhlMarketMaking(TradingStrategy):
         self.consecutive_errors = 0
         self.last_successful_trade = 0
         self.running = True
+        self.active_orders = {"buy": None, "sell": None}
         
         # Extract asset name from symbol for balance lookup
         self.asset = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
@@ -161,85 +168,106 @@ class UsdhlMarketMaking(TradingStrategy):
             self.logger.error(f"Error getting balances: {str(e)}")
             return 0, 0
     
-    def _execute_market_trade(self, is_buy: bool) -> bool:
-        """
-        Execute a market trade
-        
-        Args:
-            is_buy: True for buy, False for sell
-            
-        Returns:
-            bool: True if trade was successful
-        """
+    def _get_tick_size(self, market_data=None):
+        """Get the tick size for the symbol from exchange metadata."""
         try:
-            if is_buy:
-                if self.is_perp:
-                    result = self.order_handler.perp_market_buy(self.symbol, self.order_amount, self.leverage, self.slippage)
-                else:
-                    result = self.order_handler.market_buy(self.symbol, self.order_amount, self.slippage)
+            if self.api_connector and self.api_connector.info:
+                meta = self.api_connector.info.meta()
+                for asset_info in meta.get("universe", []):
+                    if asset_info.get("name") == self.symbol:
+                        return float(asset_info.get("tickSize", 0.00001))
+        except Exception as e:
+            self.logger.warning(f"Could not fetch tick size from metadata: {e}")
+        return 0.00001  # Default to 0.00001 for stablecoin pairs
+
+    def _format_price(self, price, tick_size=None):
+        """Format the price to the allowed tick size."""
+        if tick_size is None:
+            tick_size = self._get_tick_size()
+        return round(price / tick_size) * tick_size
+
+    def _place_buy_order(self, market_data):
+        """Place a buy limit order"""
+        try:
+            mid_price = float(market_data.get("mid_price", 0))
+            if mid_price <= 0:
+                self.logger.error("Invalid mid price for buy order")
+                return False
+
+            # Calculate buy price with spread
+            tick_size = self._get_tick_size(market_data)
+            buy_price = self._format_price(mid_price * (1 - self.bid_spread), tick_size)
+            
+            # Format order size
+            order_size = self._format_size(self.order_amount)
+            
+            # Place limit buy order
+            if self.is_perp:
+                result = self.order_handler.perp_limit_buy(self.symbol, order_size, buy_price, self.leverage)
             else:
-                if self.is_perp:
-                    result = self.order_handler.perp_market_sell(self.symbol, self.order_amount, self.leverage, self.slippage)
-                else:
-                    result = self.order_handler.market_sell(self.symbol, self.order_amount, self.slippage)
+                result = self.order_handler.limit_buy(self.symbol, order_size, buy_price)
             
             if result and result.get("status") == "ok":
-                self.logger.info(f"Successfully executed {'buy' if is_buy else 'sell'} market order")
-                self.last_successful_trade = time.time()
+                self.logger.info(f"Placed buy limit order at {buy_price} for {order_size} {self.asset}")
+                self.active_orders["buy"] = result.get("order_id")
                 return True
             else:
                 error_msg = result.get("message", "Unknown error") if result else "No result"
-                self.logger.error(f"Failed to execute {'buy' if is_buy else 'sell'} market order: {error_msg}")
+                self.logger.error(f"Failed to place buy limit order: {error_msg}")
                 return False
                 
         except Exception as e:
-            self.logger.error(f"Error executing market trade: {str(e)}")
+            self.logger.error(f"Error placing buy order: {str(e)}")
             return False
-    
-    def _get_size_decimals(self):
-        """Get the allowed number of decimals for the symbol from exchange metadata, fallback to 8."""
-        try:
-            if self.api_connector and self.api_connector.info:
-                meta = self.api_connector.info.meta()
-                for asset_info in meta.get("universe", []):
-                    if asset_info.get("name") == self.symbol:
-                        return asset_info.get("szDecimals", 8)
-        except Exception as e:
-            self.logger.warning(f"Could not fetch size decimals from metadata: {e}")
-        return 8
 
-    def _format_size(self, size):
-        """Format the order size to the allowed number of decimals."""
-        decimals = self._get_size_decimals()
-        return round(size, decimals)
-
-    def _get_min_order_size(self):
-        """Get the minimum order size for the symbol from exchange metadata, fallback to 0.00001."""
+    def _place_sell_order(self, market_data, available_balance):
+        """Place a sell limit order"""
         try:
-            if self.api_connector and self.api_connector.info:
-                meta = self.api_connector.info.meta()
-                for asset_info in meta.get("universe", []):
-                    if asset_info.get("name") == self.symbol:
-                        return float(asset_info.get("minSz", 0.00001))
-        except Exception as e:
-            self.logger.warning(f"Could not fetch min order size from metadata: {e}")
-        return 0.00001
+            mid_price = float(market_data.get("mid_price", 0))
+            if mid_price <= 0:
+                self.logger.error("Invalid mid price for sell order")
+                return False
 
-    def _get_mid_price(self):
-        """Get the current mid price for the symbol."""
-        try:
-            market_data = self.api_connector.get_market_data(self.symbol)
-            if "mid_price" in market_data:
-                return float(market_data["mid_price"])
-            elif "best_bid" in market_data and "best_ask" in market_data:
-                return (float(market_data["best_bid"]) + float(market_data["best_ask"])) / 2
+            # Calculate sell price with spread
+            tick_size = self._get_tick_size(market_data)
+            sell_price = self._format_price(mid_price * (1 + self.ask_spread), tick_size)
+            
+            # Format order size based on available balance
+            order_size = min(self._format_size(self.order_amount), self._format_size(available_balance))
+            
+            # Place limit sell order
+            if self.is_perp:
+                result = self.order_handler.perp_limit_sell(self.symbol, order_size, sell_price, self.leverage)
+            else:
+                result = self.order_handler.limit_sell(self.symbol, order_size, sell_price)
+            
+            if result and result.get("status") == "ok":
+                self.logger.info(f"Placed sell limit order at {sell_price} for {order_size} {self.asset}")
+                self.active_orders["sell"] = result.get("order_id")
+                return True
+            else:
+                error_msg = result.get("message", "Unknown error") if result else "No result"
+                self.logger.error(f"Failed to place sell limit order: {error_msg}")
+                return False
+                
         except Exception as e:
-            self.logger.warning(f"Could not fetch mid price: {e}")
-        return None
+            self.logger.error(f"Error placing sell order: {str(e)}")
+            return False
+
+    def _cancel_active_orders(self):
+        """Cancel all active orders"""
+        try:
+            for side, order_id in self.active_orders.items():
+                if order_id:
+                    self.order_handler.cancel_order(self.symbol, order_id)
+                    self.logger.info(f"Cancelled {side} order {order_id}")
+            self.active_orders = {"buy": None, "sell": None}
+        except Exception as e:
+            self.logger.error(f"Error cancelling orders: {str(e)}")
 
     def _run_strategy(self):
         """Main strategy execution loop"""
-        self.set_status("Starting stablecoin market making strategy")
+        self.set_status("Starting USDHL market making strategy")
         
         # Set leverage if using perpetual
         if self.is_perp and self.leverage > 1:
@@ -256,12 +284,6 @@ class UsdhlMarketMaking(TradingStrategy):
         # Main strategy variables
         self.running = True
         backoff_time = 0
-        last_trade_side = False  # False means last was sell, so we should buy next
-        
-        # Format order amount
-        formatted_order_amount = self._format_size(self.order_amount)
-        min_order_size = self._get_min_order_size()
-        self.logger.info(f"Using formatted order amount: {formatted_order_amount}, min order size: {min_order_size}")
         
         # Main strategy loop
         try:
@@ -273,59 +295,27 @@ class UsdhlMarketMaking(TradingStrategy):
                     time.sleep(0.1)
                     continue
                 
-                # Check if it's time to trade
+                # Check if it's time to refresh orders
                 if (current_time - self.last_tick_time) >= self.refresh_time:
+                    # Get latest market data
+                    market_data = self.api_connector.get_market_data(self.symbol)
+                    if not market_data or "mid_price" not in market_data:
+                        self.logger.warning("Could not get market data, skipping iteration")
+                        continue
+                    
                     # Get latest balances
                     asset_balance, quote_balance = self.get_balances()
                     
-                    # Initialize success variable
-                    success = False
+                    # Cancel existing orders
+                    self._cancel_active_orders()
                     
-                    # Execute trade based on last trade side
-                    if not last_trade_side:  # Last was sell, now buy
-                        if quote_balance >= formatted_order_amount:
-                            success = self._execute_market_trade(True)  # Buy full order amount
-                            if success:
-                                last_trade_side = True
-                        else:
-                            # Try to buy as much as possible with available USDC
-                            mid_price = self._get_mid_price()
-                            if mid_price:
-                                max_buy_size = self._format_size(quote_balance / mid_price)
-                                if max_buy_size >= min_order_size:
-                                    self.logger.info(f"Buying remaining size: {max_buy_size} {self.asset} with {quote_balance} {self.quote_asset} (less than order amount {formatted_order_amount})")
-                                    orig_order_amount = self.order_amount
-                                    self.order_amount = max_buy_size
-                                    success = self._execute_market_trade(True)
-                                    self.order_amount = orig_order_amount
-                                    if success:
-                                        last_trade_side = True
-                                else:
-                                    self.logger.warning(f"Insufficient {self.quote_asset} balance for buy: {quote_balance} < needed for min order size {min_order_size}")
-                            else:
-                                self.logger.warning(f"Cannot fetch mid price, skipping buy.")
-                    else:  # Last was buy, now sell
-                        # Format the available balance
-                        available_balance = self._format_size(asset_balance)
-                        if available_balance >= formatted_order_amount:
-                            success = self._execute_market_trade(False)  # Sell full order amount
-                            if success:
-                                last_trade_side = False
-                        elif available_balance >= min_order_size:
-                            # Sell whatever is left if it's above min order size
-                            self.logger.info(f"Selling remaining balance: {available_balance} {self.asset} (less than order amount {formatted_order_amount})")
-                            orig_order_amount = self.order_amount
-                            self.order_amount = available_balance
-                            success = self._execute_market_trade(False)
-                            self.order_amount = orig_order_amount
-                            if success:
-                                last_trade_side = False
-                        else:
-                            self.logger.warning(f"Insufficient {self.asset} balance for sell: {available_balance} < min order size {min_order_size}")
+                    # Place new orders
+                    buy_success = self._place_buy_order(market_data)
+                    sell_success = self._place_sell_order(market_data, asset_balance)
                     
                     # Update tracking variables
-                    if success:
-                        self.set_status(f"Successfully executed {'buy' if not last_trade_side else 'sell'} trade")
+                    if buy_success and sell_success:
+                        self.set_status(f"Placed orders around {market_data['mid_price']}")
                         self.last_tick_time = current_time
                         self.consecutive_errors = 0
                     else:
@@ -336,7 +326,7 @@ class UsdhlMarketMaking(TradingStrategy):
                         if self.consecutive_errors > 3:
                             backoff_seconds = min(30, 2 ** (self.consecutive_errors - 3))
                             backoff_time = current_time + backoff_seconds
-                            self.set_status(f"Trade execution issues, backing off for {backoff_seconds}s")
+                            self.set_status(f"Order placement issues, backing off for {backoff_seconds}s")
                 
                 # Sleep to avoid excessive CPU usage
                 time.sleep(0.01)
@@ -346,23 +336,24 @@ class UsdhlMarketMaking(TradingStrategy):
             self.set_status(f"Error: {str(e)}")
         
         finally:
+            # Cancel any remaining orders
+            self._cancel_active_orders()
             self.running = False
             self.set_status("Market making strategy stopped")
-    
+
     def get_performance_metrics(self):
-        """
-        Get performance metrics for the strategy
-        
-        Returns:
-            dict: Performance metrics
-        """
+        """Get performance metrics for the strategy"""
         try:
             asset_balance, quote_balance = self.get_balances()
-
+            market_data = self.api_connector.get_market_data(self.symbol)
+            
             metrics = {
                 "symbol": self.symbol,
                 "asset_balance": asset_balance,
                 "quote_balance": quote_balance,
+                "mid_price": market_data.get("mid_price", 0),
+                "bid_spread": self.bid_spread,
+                "ask_spread": self.ask_spread,
                 "order_size": self.order_amount,
                 "errors": self.error_count,
                 "last_trade": datetime.fromtimestamp(self.last_successful_trade).strftime("%Y-%m-%d %H:%M:%S") if self.last_successful_trade else "Never"
@@ -380,4 +371,5 @@ class UsdhlMarketMaking(TradingStrategy):
     def __del__(self):
         """Cleanup method"""
         self.running = False
+        self._cancel_active_orders()
         self.set_status("Instance cleaned up") 
