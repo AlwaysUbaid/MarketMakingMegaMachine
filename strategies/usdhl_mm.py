@@ -196,76 +196,124 @@ class UsdhlMarketMaking(TradingStrategy):
             return self._cached_tick_size
         return 0.00001  # fallback
 
-    def _format_price(self, price, tick_size=None):
-        """Format the price to the allowed tick size."""
-        if tick_size is None:
-            tick_size = self._get_tick_size()
-        return round(price / tick_size) * tick_size
+    def _format_price_buy(self, price, tick_size):
+        # Always round DOWN to nearest tick for buy
+        ticks = math.floor(price / tick_size)
+        rounded = ticks * tick_size
+        decimals = max(0, -int(math.floor(math.log10(tick_size)))) if tick_size < 1 else 0
+        return round(rounded, decimals)
+
+    def _format_price_sell(self, price, tick_size):
+        # Always round UP to nearest tick for sell
+        ticks = math.ceil(price / tick_size)
+        rounded = ticks * tick_size
+        decimals = max(0, -int(math.floor(math.log10(tick_size)))) if tick_size < 1 else 0
+        return round(rounded, decimals)
 
     def _place_buy_order(self, market_data):
-        """Place a buy limit order"""
+        """Place a buy limit order with full response logging and min size check"""
         try:
             mid_price = float(market_data.get("mid_price", 0))
             if mid_price <= 0:
                 self.logger.error("Invalid mid price for buy order")
                 return False
 
-            # Calculate buy price with spread
             tick_size = self._get_tick_size(market_data)
-            buy_price = self._format_price(mid_price * (1 - self.bid_spread), tick_size)
-            
-            # Format order size
+            min_order_size = getattr(self, '_cached_min_order_size', 0.00001)
+            if hasattr(self, '_cached_meta') and self._cached_meta:
+                for asset_info in self._cached_meta.get("universe", []):
+                    if asset_info.get("name") == self.symbol:
+                        min_order_size = float(asset_info.get("minSz", 0.00001))
+                        self._cached_min_order_size = min_order_size
+                        break
+
             order_size = self._format_size(self.order_amount)
-            
-            # Place limit buy order
+            if order_size < min_order_size:
+                self.logger.warning(f"Buy order size {order_size} is below minimum {min_order_size}, skipping.")
+                return False
+
+            buy_price = self._format_price_buy(mid_price * (1 - self.bid_spread), tick_size)
+
             if self.is_perp:
                 result = self.order_handler.perp_limit_buy(self.symbol, order_size, buy_price, self.leverage)
             else:
                 result = self.order_handler.limit_buy(self.symbol, order_size, buy_price)
-            
+
+            self.logger.info(f"Buy order response: {result}")
+
             if result and result.get("status") == "ok":
-                self.logger.info(f"Placed buy limit order at {buy_price} for {order_size} {self.asset}")
-                self.active_orders["buy"] = result.get("order_id")
-                return True
+                statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+                for status in statuses:
+                    if "resting" in status:
+                        self.logger.info(f"Placed buy limit order at {buy_price} for {order_size} {self.asset} (order open)")
+                        self.active_orders["buy"] = status["resting"].get("oid")
+                        return True
+                    elif "filled" in status:
+                        self.logger.info(f"Buy order immediately filled at {buy_price} for {order_size} {self.asset}")
+                        return False
+                    elif "error" in status:
+                        self.logger.error(f"Buy order error: {status['error']}")
+                        return False
+                self.logger.warning("Buy order not resting, not filled, not error. Check response.")
+                return False
             else:
                 error_msg = result.get("message", "Unknown error") if result else "No result"
                 self.logger.error(f"Failed to place buy limit order: {error_msg}")
                 return False
-                
         except Exception as e:
             self.logger.error(f"Error placing buy order: {str(e)}")
             return False
 
     def _place_sell_order(self, market_data, available_balance):
-        """Place a sell limit order"""
+        """Place a sell limit order with full response logging and min size check"""
         try:
             mid_price = float(market_data.get("mid_price", 0))
             if mid_price <= 0:
                 self.logger.error("Invalid mid price for sell order")
                 return False
 
-            # Calculate sell price with spread
             tick_size = self._get_tick_size(market_data)
-            sell_price = self._format_price(mid_price * (1 + self.ask_spread), tick_size)
-            
-            # Format order size based on available balance
+            min_order_size = getattr(self, '_cached_min_order_size', 0.00001)
+            if hasattr(self, '_cached_meta') and self._cached_meta:
+                for asset_info in self._cached_meta.get("universe", []):
+                    if asset_info.get("name") == self.symbol:
+                        min_order_size = float(asset_info.get("minSz", 0.00001))
+                        self._cached_min_order_size = min_order_size
+                        break
+
             order_size = min(self._format_size(self.order_amount), self._format_size(available_balance))
-            
-            # Place limit sell order
+            if order_size < min_order_size:
+                self.logger.warning(f"Sell order size {order_size} is below minimum {min_order_size}, skipping.")
+                return False
+
+            sell_price = self._format_price_sell(mid_price * (1 + self.ask_spread), tick_size)
+
             if self.is_perp:
                 result = self.order_handler.perp_limit_sell(self.symbol, order_size, sell_price, self.leverage)
             else:
                 result = self.order_handler.limit_sell(self.symbol, order_size, sell_price)
-            
+
+            self.logger.info(f"Sell order response: {result}")
+
             if result and result.get("status") == "ok":
-                self.logger.info(f"Placed sell limit order at {sell_price} for {order_size} {self.asset}")
-                self.active_orders["sell"] = result.get("order_id")
-                return True
+                statuses = result.get("response", {}).get("data", {}).get("statuses", [])
+                for status in statuses:
+                    if "resting" in status:
+                        self.logger.info(f"Placed sell limit order at {sell_price} for {order_size} {self.asset} (order open)")
+                        self.active_orders["sell"] = status["resting"].get("oid")
+                        return True
+                    elif "filled" in status:
+                        self.logger.info(f"Sell order immediately filled at {sell_price} for {order_size} {self.asset}")
+                        return False
+                    elif "error" in status:
+                        self.logger.error(f"Sell order error: {status['error']}")
+                        return False
+                self.logger.warning("Sell order not resting, not filled, not error. Check response.")
+                return False
             else:
                 error_msg = result.get("message", "Unknown error") if result else "No result"
                 self.logger.error(f"Failed to place sell limit order: {error_msg}")
                 return False
-                
         except Exception as e:
             self.logger.error(f"Error placing sell order: {str(e)}")
             return False
