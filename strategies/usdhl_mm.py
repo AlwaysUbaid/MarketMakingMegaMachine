@@ -42,12 +42,12 @@ class UsdhlMarketMaking(TradingStrategy):
             "description": "Time in seconds between trades"
         },
         "bid_spread": {
-            "value": 0.00005,  # 0.005% below mid price
+            "value": 0.000011,  # 0.005% below mid price
             "type": "float",
             "description": "Spread below mid price for buy orders"
         },
         "ask_spread": {
-            "value": 0.00005,  # 0.005% above mid price
+            "value": 0.000012,  # 0.005% above mid price
             "type": "float",
             "description": "Spread above mid price for sell orders"
         },
@@ -372,4 +372,21 @@ class UsdhlMarketMaking(TradingStrategy):
         """Cleanup method"""
         self.running = False
         self._cancel_active_orders()
-        self.set_status("Instance cleaned up") 
+        self.set_status("Instance cleaned up")
+
+    def _get_size_decimals(self):
+        """Get the allowed number of decimals for the symbol from exchange metadata, fallback to 8."""
+        try:
+            if self.api_connector and self.api_connector.info:
+                meta = self.api_connector.info.meta()
+                for asset_info in meta.get("universe", []):
+                    if asset_info.get("name") == self.symbol:
+                        return asset_info.get("szDecimals", 8)
+        except Exception as e:
+            self.logger.warning(f"Could not fetch size decimals from metadata: {e}")
+        return 8
+
+    def _format_size(self, size):
+        """Format the order size to the allowed number of decimals."""
+        decimals = self._get_size_decimals()
+        return round(size, decimals) 
