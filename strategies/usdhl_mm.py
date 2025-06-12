@@ -225,6 +225,18 @@ class UsdhlMarketMaking(TradingStrategy):
             self.logger.warning(f"Could not fetch min order size from metadata: {e}")
         return 0.00001
 
+    def _get_mid_price(self):
+        """Get the current mid price for the symbol."""
+        try:
+            market_data = self.api_connector.get_market_data(self.symbol)
+            if "mid_price" in market_data:
+                return float(market_data["mid_price"])
+            elif "best_bid" in market_data and "best_ask" in market_data:
+                return (float(market_data["best_bid"]) + float(market_data["best_ask"])) / 2
+        except Exception as e:
+            self.logger.warning(f"Could not fetch mid price: {e}")
+        return None
+
     def _run_strategy(self):
         """Main strategy execution loop"""
         self.set_status("Starting stablecoin market making strategy")
@@ -272,11 +284,26 @@ class UsdhlMarketMaking(TradingStrategy):
                     # Execute trade based on last trade side
                     if not last_trade_side:  # Last was sell, now buy
                         if quote_balance >= formatted_order_amount:
-                            success = self._execute_market_trade(True)  # Buy
+                            success = self._execute_market_trade(True)  # Buy full order amount
                             if success:
                                 last_trade_side = True
                         else:
-                            self.logger.warning(f"Insufficient {self.quote_asset} balance for buy: {quote_balance} < {formatted_order_amount}")
+                            # Try to buy as much as possible with available USDC
+                            mid_price = self._get_mid_price()
+                            if mid_price:
+                                max_buy_size = self._format_size(quote_balance / mid_price)
+                                if max_buy_size >= min_order_size:
+                                    self.logger.info(f"Buying remaining size: {max_buy_size} {self.asset} with {quote_balance} {self.quote_asset} (less than order amount {formatted_order_amount})")
+                                    orig_order_amount = self.order_amount
+                                    self.order_amount = max_buy_size
+                                    success = self._execute_market_trade(True)
+                                    self.order_amount = orig_order_amount
+                                    if success:
+                                        last_trade_side = True
+                                else:
+                                    self.logger.warning(f"Insufficient {self.quote_asset} balance for buy: {quote_balance} < needed for min order size {min_order_size}")
+                            else:
+                                self.logger.warning(f"Cannot fetch mid price, skipping buy.")
                     else:  # Last was buy, now sell
                         # Format the available balance
                         available_balance = self._format_size(asset_balance)
@@ -287,7 +314,6 @@ class UsdhlMarketMaking(TradingStrategy):
                         elif available_balance >= min_order_size:
                             # Sell whatever is left if it's above min order size
                             self.logger.info(f"Selling remaining balance: {available_balance} {self.asset} (less than order amount {formatted_order_amount})")
-                            # Temporarily override self.order_amount for this trade
                             orig_order_amount = self.order_amount
                             self.order_amount = available_balance
                             success = self._execute_market_trade(False)
