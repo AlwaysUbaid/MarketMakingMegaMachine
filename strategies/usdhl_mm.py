@@ -95,6 +95,13 @@ class UsdhlMarketMaking(TradingStrategy):
         # Extract asset name from symbol for balance lookup
         self.asset = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
         
+        # Add to __init__
+        self._cached_meta = None
+        self._cached_meta_time = 0
+        self._cached_tick_size = None
+        self._cached_size_decimals = None
+        self._meta_cache_ttl = 300  # 5 minutes
+        
     def _get_param_value(self, param_name):
         """Helper method to extract parameter values"""
         if param_name in self.params:
@@ -168,17 +175,26 @@ class UsdhlMarketMaking(TradingStrategy):
             self.logger.error(f"Error getting balances: {str(e)}")
             return 0, 0
     
-    def _get_tick_size(self, market_data=None):
-        """Get the tick size for the symbol from exchange metadata."""
-        try:
-            if self.api_connector and self.api_connector.info:
-                meta = self.api_connector.info.meta()
-                for asset_info in meta.get("universe", []):
+    def _refresh_meta_cache(self):
+        now = time.time()
+        if self._cached_meta is None or (now - self._cached_meta_time) > self._meta_cache_ttl:
+            try:
+                self._cached_meta = self.api_connector.info.meta()
+                self._cached_meta_time = now
+                # Update tick size and size decimals
+                for asset_info in self._cached_meta.get("universe", []):
                     if asset_info.get("name") == self.symbol:
-                        return float(asset_info.get("tickSize", 0.00001))
-        except Exception as e:
-            self.logger.warning(f"Could not fetch tick size from metadata: {e}")
-        return 0.00001  # Default to 0.00001 for stablecoin pairs
+                        self._cached_tick_size = float(asset_info.get("tickSize", 0.00001))
+                        self._cached_size_decimals = asset_info.get("szDecimals", 8)
+                        break
+            except Exception as e:
+                self.logger.warning(f"Could not fetch meta for {self.symbol}: {e}")
+
+    def _get_tick_size(self, market_data=None):
+        self._refresh_meta_cache()
+        if self._cached_tick_size is not None:
+            return self._cached_tick_size
+        return 0.00001  # fallback
 
     def _format_price(self, price, tick_size=None):
         """Format the price to the allowed tick size."""
@@ -375,15 +391,9 @@ class UsdhlMarketMaking(TradingStrategy):
         self.set_status("Instance cleaned up")
 
     def _get_size_decimals(self):
-        """Get the allowed number of decimals for the symbol from exchange metadata, fallback to 8."""
-        try:
-            if self.api_connector and self.api_connector.info:
-                meta = self.api_connector.info.meta()
-                for asset_info in meta.get("universe", []):
-                    if asset_info.get("name") == self.symbol:
-                        return asset_info.get("szDecimals", 8)
-        except Exception as e:
-            self.logger.warning(f"Could not fetch size decimals from metadata: {e}")
+        self._refresh_meta_cache()
+        if self._cached_size_decimals is not None:
+            return self._cached_size_decimals
         return 8
 
     def _format_size(self, size):
