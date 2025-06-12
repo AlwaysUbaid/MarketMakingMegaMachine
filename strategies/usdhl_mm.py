@@ -213,6 +213,18 @@ class UsdhlMarketMaking(TradingStrategy):
         decimals = self._get_size_decimals()
         return round(size, decimals)
 
+    def _get_min_order_size(self):
+        """Get the minimum order size for the symbol from exchange metadata, fallback to 0.00001."""
+        try:
+            if self.api_connector and self.api_connector.info:
+                meta = self.api_connector.info.meta()
+                for asset_info in meta.get("universe", []):
+                    if asset_info.get("name") == self.symbol:
+                        return float(asset_info.get("minSz", 0.00001))
+        except Exception as e:
+            self.logger.warning(f"Could not fetch min order size from metadata: {e}")
+        return 0.00001
+
     def _run_strategy(self):
         """Main strategy execution loop"""
         self.set_status("Starting stablecoin market making strategy")
@@ -236,7 +248,8 @@ class UsdhlMarketMaking(TradingStrategy):
         
         # Format order amount
         formatted_order_amount = self._format_size(self.order_amount)
-        self.logger.info(f"Using formatted order amount: {formatted_order_amount}")
+        min_order_size = self._get_min_order_size()
+        self.logger.info(f"Using formatted order amount: {formatted_order_amount}, min order size: {min_order_size}")
         
         # Main strategy loop
         try:
@@ -268,11 +281,21 @@ class UsdhlMarketMaking(TradingStrategy):
                         # Format the available balance
                         available_balance = self._format_size(asset_balance)
                         if available_balance >= formatted_order_amount:
-                            success = self._execute_market_trade(False)  # Sell
+                            success = self._execute_market_trade(False)  # Sell full order amount
+                            if success:
+                                last_trade_side = False
+                        elif available_balance >= min_order_size:
+                            # Sell whatever is left if it's above min order size
+                            self.logger.info(f"Selling remaining balance: {available_balance} {self.asset} (less than order amount {formatted_order_amount})")
+                            # Temporarily override self.order_amount for this trade
+                            orig_order_amount = self.order_amount
+                            self.order_amount = available_balance
+                            success = self._execute_market_trade(False)
+                            self.order_amount = orig_order_amount
                             if success:
                                 last_trade_side = False
                         else:
-                            self.logger.warning(f"Insufficient {self.asset} balance for sell: {available_balance} < {formatted_order_amount}")
+                            self.logger.warning(f"Insufficient {self.asset} balance for sell: {available_balance} < min order size {min_order_size}")
                     
                     # Update tracking variables
                     if success:
