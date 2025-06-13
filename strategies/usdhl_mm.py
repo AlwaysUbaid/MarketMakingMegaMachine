@@ -5,12 +5,15 @@ import time
 import uuid
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List, Any
+from decimal import Decimal, getcontext, ROUND_DOWN, ROUND_UP
 
 # Import the base strategy class
 from strategy_selector import TradingStrategy
 
 # Class-level registry to track active instances per symbol
 _active_instances = {}
+
+getcontext().prec = 18
 
 class UsdhlMarketMaking(TradingStrategy):
     """
@@ -32,7 +35,7 @@ class UsdhlMarketMaking(TradingStrategy):
             "description": "Trading pair symbol"
         },
         "order_amount": {
-            "value": 13,  # Order size for each trade
+            "value": 14.0,  # Order size for each trade
             "type": "float",
             "description": "Size of each order"
         },
@@ -197,18 +200,23 @@ class UsdhlMarketMaking(TradingStrategy):
         return 0.00001  # fallback
 
     def _format_price_buy(self, price, tick_size):
-        # Always round DOWN to nearest tick for buy
-        ticks = math.floor(price / tick_size)
-        rounded = ticks * tick_size
-        decimals = max(0, -int(math.floor(math.log10(tick_size)))) if tick_size < 1 else 0
-        return round(rounded, decimals)
+        price = Decimal(str(price))
+        tick_size = Decimal(str(tick_size))
+        ticks = int(price / tick_size)
+        price = ticks * tick_size
+        return float(price)
 
     def _format_price_sell(self, price, tick_size):
-        # Always round UP to nearest tick for sell
-        ticks = math.ceil(price / tick_size)
-        rounded = ticks * tick_size
-        decimals = max(0, -int(math.floor(math.log10(tick_size)))) if tick_size < 1 else 0
-        return round(rounded, decimals)
+        price = Decimal(str(price))
+        tick_size = Decimal(str(tick_size))
+        ticks = int((price / tick_size).to_integral_value(rounding=ROUND_UP))
+        price = ticks * tick_size
+        return float(price)
+
+    def _is_price_divisible(self, price, tick_size):
+        # Both should be float at this point
+        ratio = price / tick_size
+        return abs(ratio - round(ratio)) < 1e-8
 
     def _place_buy_order(self, market_data):
         """Place a buy limit order with full response logging and min size check"""
@@ -232,7 +240,16 @@ class UsdhlMarketMaking(TradingStrategy):
                 self.logger.warning(f"Buy order size {order_size} is below minimum {min_order_size}, skipping.")
                 return False
 
-            buy_price = self._format_price_buy(mid_price * (1 - self.bid_spread), tick_size)
+            # Debug logging for tick size divisibility
+            self.logger.info(f"DEBUG: mid_price={mid_price}, bid_spread={self.bid_spread}, tick_size={tick_size}")
+            raw_buy_price = mid_price * (1 - self.bid_spread)
+            self.logger.info(f"DEBUG: raw_buy_price={raw_buy_price}")
+            buy_price = self._format_price_buy(raw_buy_price, tick_size)
+            self.logger.info(f"DEBUG: buy_price (rounded)={buy_price}")
+
+            if not self._is_price_divisible(buy_price, tick_size):
+                self.logger.error(f"Buy price {buy_price} is not divisible by tick size {tick_size}")
+                return False
 
             if self.is_perp:
                 result = self.order_handler.perp_limit_buy(self.symbol, order_size, buy_price, self.leverage)
@@ -283,10 +300,19 @@ class UsdhlMarketMaking(TradingStrategy):
 
             order_size = min(self._format_size(self.order_amount), self._format_size(available_balance))
             if order_size < min_order_size:
-                self.logger.warning(f"Sell order size {order_size} is below minimum {min_order_size}, skipping.")
+                self.logger.warning(f"Sell order size {order_size} is below minimum {min_order_size}, skipping. (min_order_size={min_order_size})")
                 return False
 
-            sell_price = self._format_price_sell(mid_price * (1 + self.ask_spread), tick_size)
+            # Debug logging for sell price rounding
+            self.logger.info(f"DEBUG: mid_price={mid_price}, ask_spread={self.ask_spread}, tick_size={tick_size}")
+            raw_sell_price = mid_price * (1 + self.ask_spread)
+            self.logger.info(f"DEBUG: raw_sell_price={raw_sell_price}")
+            sell_price = self._format_price_sell(raw_sell_price, tick_size)
+            self.logger.info(f"DEBUG: sell_price (rounded)={sell_price}")
+
+            if not self._is_price_divisible(sell_price, tick_size):
+                self.logger.error(f"Sell price {sell_price} is not divisible by tick size {tick_size}")
+                return False
 
             if self.is_perp:
                 result = self.order_handler.perp_limit_sell(self.symbol, order_size, sell_price, self.leverage)
