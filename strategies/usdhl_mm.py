@@ -5,7 +5,6 @@ import time
 import uuid
 from datetime import datetime
 from typing import Dict, Optional, Tuple, List, Any
-from decimal import Decimal, getcontext, ROUND_DOWN, ROUND_UP
 
 # Import the base strategy class
 from strategy_selector import TradingStrategy
@@ -13,19 +12,17 @@ from strategy_selector import TradingStrategy
 # Class-level registry to track active instances per symbol
 _active_instances = {}
 
-getcontext().prec = 18
-
-class UsdhlMarketMaking(TradingStrategy):
+class USDHLMarketMaking(TradingStrategy):
     """
     USDHL Market Making Strategy
     
-    This strategy places limit orders around the mid price for the USDHL/USDC pair,
-    with very tight spreads optimized for stablecoin trading.
+    This strategy places buy and sell orders around the mid price,
+    aiming to profit from the spread between bids and asks.
     """
     
     # Strategy metadata
     STRATEGY_NAME = "USDHL Market Making"
-    STRATEGY_DESCRIPTION = "Limit order market making for stablecoin pair with tight spreads"
+    STRATEGY_DESCRIPTION = "Places buy and sell orders around the mid price to earn the spread"
     
     # Default parameters with descriptions
     STRATEGY_PARAMS = {
@@ -34,25 +31,30 @@ class UsdhlMarketMaking(TradingStrategy):
             "type": "str",
             "description": "Trading pair symbol"
         },
+        "bid_spread": {
+            "value": 0.0001,  # 0.1%
+            "type": "float",
+            "description": "Spread below mid price for buy orders (as a decimal)"
+        },
+        "ask_spread": {
+            "value": 0.00012,  # 0.1%
+            "type": "float",
+            "description": "Spread above mid price for sell orders (as a decimal)"
+        },
         "order_amount": {
-            "value": 14.0,  # Order size for each trade
+            "value": 12.2,
             "type": "float",
             "description": "Size of each order"
         },
         "refresh_time": {
-            "value": 3,  # 3 seconds between trades
+            "value": 30,  # 10 seconds
             "type": "int",
-            "description": "Time in seconds between trades"
+            "description": "Time in seconds between order refresh"
         },
-        "bid_spread": {
-            "value": 0.000011,  # 0.005% below mid price
-            "type": "float",
-            "description": "Spread below mid price for buy orders"
-        },
-        "ask_spread": {
-            "value": 0.000012,  # 0.005% above mid price
-            "type": "float",
-            "description": "Spread above mid price for sell orders"
+        "order_max_age": {
+            "value": 60,  # 30 seconds default
+            "type": "int",
+            "description": "Maximum time in seconds before unfilled orders are cancelled and replaced"
         },
         "is_perp": {
             "value": False,
@@ -77,33 +79,35 @@ class UsdhlMarketMaking(TradingStrategy):
         _active_instances[self.symbol].append(self)
         
         # Extract parameter values
-        self.order_amount = self._get_param_value("order_amount")
-        self.refresh_time = self._get_param_value("refresh_time")
         self.bid_spread = self._get_param_value("bid_spread")
         self.ask_spread = self._get_param_value("ask_spread")
+        self.order_amount = self._get_param_value("order_amount")
+        self.refresh_time = self._get_param_value("refresh_time")
+        self.order_max_age = self._get_param_value("order_max_age")
         self.is_perp = self._get_param_value("is_perp")
         self.leverage = self._get_param_value("leverage")
         
         # Runtime variables
         self.last_tick_time = 0
         self.mid_price = 0
+        self.active_buy_order_id = None
+        self.active_sell_order_id = None
+        self.active_buy_order_time = None  
+        self.active_sell_order_time = None  
         self.status_message = "Initialized"
         self.status_lock = threading.Lock()
+        self.prev_mid_price = None
+        self.last_order_update = 0
         self.error_count = 0
         self.consecutive_errors = 0
-        self.last_successful_trade = 0
-        self.running = True
-        self.active_orders = {"buy": None, "sell": None}
+        self.last_successful_placement = 0
+        self.last_cancel_time = 0  # Track when we last cancelled all orders
+        self.auto_cancel_thread = None
+        self.auto_cancel_active = False
+        self.auto_cancel_interval = 15  # Default, can be set via param if desired
         
         # Extract asset name from symbol for balance lookup
         self.asset = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
-        
-        # Add to __init__
-        self._cached_meta = None
-        self._cached_meta_time = 0
-        self._cached_tick_size = None
-        self._cached_size_decimals = None
-        self._meta_cache_ttl = 300  # 5 minutes
         
     def _get_param_value(self, param_name):
         """Helper method to extract parameter values"""
@@ -154,21 +158,22 @@ class UsdhlMarketMaking(TradingStrategy):
                 balances = self.api_connector.get_balances()
                 for balance in balances.get("spot", []):
                     if balance.get("asset") == self.asset:
-                        asset_balance = float(balance.get("total", 0))
+                        asset_balance = float(balance.get("total", 0))  # Use total instead of available
                         break
             
-            # Get quote balance
+            # Get quote balance - use spot_state directly for accurate balance
             try:
                 spot_state = self.api_connector.info.spot_user_state(self.api_connector.wallet_address)
                 for balance in spot_state.get("balances", []):
                     if balance.get("coin") == self.quote_asset:
-                        quote_balance = float(balance.get("total", 0))
+                        quote_balance = float(balance.get("total", 0))  # Use total instead of available
                         break
             except:
+                # Fallback to regular balance method
                 balances = self.api_connector.get_balances()
                 for balance in balances.get("spot", []):
                     if balance.get("asset") == self.quote_asset:
-                        quote_balance = float(balance.get("total", 0))
+                        quote_balance = float(balance.get("total", 0))  # Use total instead of available
                         break
                     
             self.logger.info(f"Current balances: {asset_balance} {self.asset}, {quote_balance} {self.quote_asset}")
@@ -176,188 +181,242 @@ class UsdhlMarketMaking(TradingStrategy):
             
         except Exception as e:
             self.logger.error(f"Error getting balances: {str(e)}")
-            return 0, 0
+            # If we can't get balances, assume we have funds to continue trading
+            return 0, 99.0  # Default to $99 if we can't get actual balance
     
-    def _refresh_meta_cache(self):
-        now = time.time()
-        if self._cached_meta is None or (now - self._cached_meta_time) > self._meta_cache_ttl:
-            try:
-                self._cached_meta = self.api_connector.info.meta()
-                self._cached_meta_time = now
-                # Update tick size and size decimals
-                for asset_info in self._cached_meta.get("universe", []):
+    def _check_order_result(self, result, side_str):
+        """
+        Check order result and handle errors
+        
+        Args:
+            result: Order result dictionary
+            side_str: String indicating order side ("Buy" or "Sell")
+            
+        Returns:
+            Tuple of (success, order_id, error_message)
+        """
+        if not result:
+            return False, None, "No result returned"
+            
+        if result["status"] != "ok":
+            error_msg = result.get("message", "Unknown error")
+            if "Insufficient spot balance" in error_msg:
+                self.logger.error(f"{side_str} order error: {error_msg}")
+                self._trigger_auto_cancel_all()
+            return False, None, error_msg
+            
+        if "response" not in result or "data" not in result["response"] or "statuses" not in result["response"]["data"]:
+            return False, None, "Invalid response format"
+            
+        # Check for specific error messages in response
+        for status in result["response"]["data"]["statuses"]:
+            if "error" in status:
+                error_msg = status["error"]
+                self.logger.error(f"{side_str} order error: {error_msg}")
+                if "Insufficient spot balance" in error_msg:
+                    self._trigger_auto_cancel_all()
+                return False, None, error_msg
+            
+            if "resting" in status:
+                self._stop_auto_cancel_all()
+                order_id = status["resting"]["oid"]
+                return True, order_id, None
+                
+            if "filled" in status:
+                self._stop_auto_cancel_all()
+                # Order was immediately filled
+                filled = status["filled"]
+                order_id = filled.get("oid", 0)
+                self.logger.info(f"{side_str} order immediately filled: {filled.get('totalSz', 0)} @ {filled.get('avgPx', 0)}")
+                return True, order_id, None
+                
+        return False, None, "No resting order or specific error found in response"
+    
+    def _get_size_decimals(self):
+        """Get the allowed number of decimals for the symbol from exchange metadata, fallback to 8."""
+        try:
+            if self.api_connector and self.api_connector.info:
+                meta = self.api_connector.info.meta()
+                for asset_info in meta.get("universe", []):
                     if asset_info.get("name") == self.symbol:
-                        self._cached_tick_size = float(asset_info.get("tickSize", 0.00001))
-                        self._cached_size_decimals = asset_info.get("szDecimals", 8)
-                        break
-            except Exception as e:
-                self.logger.warning(f"Could not fetch meta for {self.symbol}: {e}")
+                        return asset_info.get("szDecimals", 8)
+        except Exception as e:
+            self.logger.warning(f"Could not fetch size decimals from metadata: {e}")
+        return 16
 
-    def _get_tick_size(self, market_data=None):
-        self._refresh_meta_cache()
-        if self._cached_tick_size is not None:
-            return self._cached_tick_size
-        return 0.00001  # fallback
-
-    def _format_price_buy(self, price, tick_size):
-        price = Decimal(str(price))
-        tick_size = Decimal(str(tick_size))
-        ticks = int(price / tick_size)
-        price = ticks * tick_size
-        return float(price)
-
-    def _format_price_sell(self, price, tick_size):
-        price = Decimal(str(price))
-        tick_size = Decimal(str(tick_size))
-        ticks = int((price / tick_size).to_integral_value(rounding=ROUND_UP))
-        price = ticks * tick_size
-        return float(price)
-
-    def _is_price_divisible(self, price, tick_size):
-        # Both should be float at this point
-        ratio = price / tick_size
-        return abs(ratio - round(ratio)) < 1e-8
+    def _format_size(self, size):
+        """Format the order size to the allowed number of decimals."""
+        decimals = self._get_size_decimals()
+        return round(size, decimals)
 
     def _place_buy_order(self, market_data):
-        """Place a buy limit order with full response logging and min size check"""
+        """
+        Place a buy order at an appropriate price
+        
+        Args:
+            market_data: Dictionary with market data including best_bid, best_ask
+            
+        Returns:
+            Tuple of (success, order_id)
+        """
         try:
-            mid_price = float(market_data.get("mid_price", 0))
-            if mid_price <= 0:
-                self.logger.error("Invalid mid price for buy order")
-                return False
-
             tick_size = self._get_tick_size(market_data)
-            min_order_size = getattr(self, '_cached_min_order_size', 0.00001)
-            if hasattr(self, '_cached_meta') and self._cached_meta:
-                for asset_info in self._cached_meta.get("universe", []):
-                    if asset_info.get("name") == self.symbol:
-                        min_order_size = float(asset_info.get("minSz", 0.00001))
-                        self._cached_min_order_size = min_order_size
-                        break
-
-            order_size = self._format_size(self.order_amount)
-            if order_size < min_order_size:
-                self.logger.warning(f"Buy order size {order_size} is below minimum {min_order_size}, skipping.")
-                return False
-
-            # Debug logging for tick size divisibility
-            self.logger.info(f"DEBUG: mid_price={mid_price}, bid_spread={self.bid_spread}, tick_size={tick_size}")
-            raw_buy_price = mid_price * (1 - self.bid_spread)
-            self.logger.info(f"DEBUG: raw_buy_price={raw_buy_price}")
-            buy_price = self._format_price_buy(raw_buy_price, tick_size)
-            self.logger.info(f"DEBUG: buy_price (rounded)={buy_price}")
-
-            if not self._is_price_divisible(buy_price, tick_size):
-                self.logger.error(f"Buy price {buy_price} is not divisible by tick size {tick_size}")
-                return False
-
+            best_bid = market_data.get("best_bid", 0)
+            best_ask = market_data.get("best_ask", 0)
+            
+            if not best_bid or not best_ask:
+                self.logger.error("Missing market data, cannot place buy order")
+                return False, None
+            
+            # Calculate buy price as spread away from mid price
+            # Ensure it's below best ask to avoid crossing book
+            mid_price = (best_bid + best_ask) / 2
+            bid_price = mid_price * (1 - self.bid_spread)
+            bid_price = min(bid_price, best_ask - tick_size)  # Ensure below best ask
+            bid_price = max(bid_price, 0.0000001)  # Ensure positive price
+            
+            # Format price to valid tick size
+            bid_price = self._format_price(bid_price, tick_size)
+            
+            # Use exact order amount, but format it
+            buy_size = self._format_size(self.order_amount)
+            
+            self.logger.info(f"Placing buy order: {buy_size} {self.symbol} @ {bid_price}")
+            
+            # Place appropriate order type
             if self.is_perp:
-                result = self.order_handler.perp_limit_buy(self.symbol, order_size, buy_price, self.leverage)
+                result = self.order_handler.perp_limit_buy(self.symbol, buy_size, bid_price, self.leverage)
             else:
-                result = self.order_handler.limit_buy(self.symbol, order_size, buy_price)
-
-            self.logger.info(f"Buy order response: {result}")
-
-            if result and result.get("status") == "ok":
-                statuses = result.get("response", {}).get("data", {}).get("statuses", [])
-                for status in statuses:
-                    if "resting" in status:
-                        self.logger.info(f"Placed buy limit order at {buy_price} for {order_size} {self.asset} (order open)")
-                        self.active_orders["buy"] = status["resting"].get("oid")
-                        return True
-                    elif "filled" in status:
-                        self.logger.info(f"Buy order immediately filled at {buy_price} for {order_size} {self.asset}")
-                        return False
-                    elif "error" in status:
-                        self.logger.error(f"Buy order error: {status['error']}")
-                        return False
-                self.logger.warning("Buy order not resting, not filled, not error. Check response.")
-                return False
+                result = self.order_handler.limit_buy(self.symbol, buy_size, bid_price)
+            
+            # Check result
+            success, order_id, error_msg = self._check_order_result(result, "Buy")
+            if success:
+                self.active_buy_order_id = order_id
+                self.active_buy_order_time = time.time()
+                self.logger.info(f"Successfully placed buy order ID {order_id} at {bid_price}")
+                return True, order_id
             else:
-                error_msg = result.get("message", "Unknown error") if result else "No result"
-                self.logger.error(f"Failed to place buy limit order: {error_msg}")
-                return False
+                self.logger.error(f"Failed to place buy order: {error_msg}")
+                return False, None
+                
         except Exception as e:
             self.logger.error(f"Error placing buy order: {str(e)}")
-            return False
-
+            return False, None
+    
     def _place_sell_order(self, market_data, available_balance):
-        """Place a sell limit order with full response logging and min size check"""
+        """
+        Place a sell order at an appropriate price
+        
+        Args:
+            market_data: Dictionary with market data including best_bid, best_ask
+            available_balance: Available balance of the asset to sell
+            
+        Returns:
+            Tuple of (success, order_id)
+        """
         try:
-            mid_price = float(market_data.get("mid_price", 0))
-            if mid_price <= 0:
-                self.logger.error("Invalid mid price for sell order")
-                return False
-
             tick_size = self._get_tick_size(market_data)
-            min_order_size = getattr(self, '_cached_min_order_size', 0.00001)
-            if hasattr(self, '_cached_meta') and self._cached_meta:
-                for asset_info in self._cached_meta.get("universe", []):
-                    if asset_info.get("name") == self.symbol:
-                        min_order_size = float(asset_info.get("minSz", 0.00001))
-                        self._cached_min_order_size = min_order_size
-                        break
-
-            order_size = min(self._format_size(self.order_amount), self._format_size(available_balance))
-            if order_size < min_order_size:
-                self.logger.warning(f"Sell order size {order_size} is below minimum {min_order_size}, skipping. (min_order_size={min_order_size})")
-                return False
-
-            # Debug logging for sell price rounding
-            self.logger.info(f"DEBUG: mid_price={mid_price}, ask_spread={self.ask_spread}, tick_size={tick_size}")
-            raw_sell_price = mid_price * (1 + self.ask_spread)
-            self.logger.info(f"DEBUG: raw_sell_price={raw_sell_price}")
-            sell_price = self._format_price_sell(raw_sell_price, tick_size)
-            self.logger.info(f"DEBUG: sell_price (rounded)={sell_price}")
-
-            if not self._is_price_divisible(sell_price, tick_size):
-                self.logger.error(f"Sell price {sell_price} is not divisible by tick size {tick_size}")
-                return False
-
+            best_bid = market_data.get("best_bid", 0)
+            best_ask = market_data.get("best_ask", 0)
+            
+            if not best_bid or not best_ask:
+                self.logger.error("Missing market data, cannot place sell order")
+                return False, None
+            
+            # Calculate appropriate sell size based on available balance
+            sell_size = min(self.order_amount, available_balance)
+            
+            # Check if we have enough to sell
+            if sell_size < 0.00001:  # Minimum size to avoid errors
+                self.logger.warning(f"Available balance too small to sell: {available_balance}")
+                return False, None
+            
+            # Calculate sell price as spread away from mid price
+            mid_price = (best_bid + best_ask) / 2
+            # Format mid price to tick size first
+            mid_price = self._format_price(mid_price, tick_size)
+            # Then apply spread
+            ask_price = mid_price * (1 + self.ask_spread)
+            # Format again to ensure it's divisible by tick size
+            ask_price = self._format_price(ask_price, tick_size)
+            # Ensure it's above best bid
+            ask_price = max(ask_price, self._format_price(best_bid + tick_size, tick_size))
+            
+            # Check if the total value is above $10
+            total_value = sell_size * ask_price
+            if total_value < 10.0:
+                self.logger.info(f"Skipping sell order - total value ${total_value:.2f} is below $10 minimum")
+                return False, None
+            
+            # Format sell size
+            sell_size = self._format_size(sell_size)
+            
+            self.logger.info(f"Placing sell order: {sell_size} {self.symbol} @ {ask_price}")
+            
+            # Place appropriate order type
             if self.is_perp:
-                result = self.order_handler.perp_limit_sell(self.symbol, order_size, sell_price, self.leverage)
+                result = self.order_handler.perp_limit_sell(self.symbol, sell_size, ask_price, self.leverage)
             else:
-                result = self.order_handler.limit_sell(self.symbol, order_size, sell_price)
-
-            self.logger.info(f"Sell order response: {result}")
-
-            if result and result.get("status") == "ok":
-                statuses = result.get("response", {}).get("data", {}).get("statuses", [])
-                for status in statuses:
-                    if "resting" in status:
-                        self.logger.info(f"Placed sell limit order at {sell_price} for {order_size} {self.asset} (order open)")
-                        self.active_orders["sell"] = status["resting"].get("oid")
-                        return True
-                    elif "filled" in status:
-                        self.logger.info(f"Sell order immediately filled at {sell_price} for {order_size} {self.asset}")
-                        return False
-                    elif "error" in status:
-                        self.logger.error(f"Sell order error: {status['error']}")
-                        return False
-                self.logger.warning("Sell order not resting, not filled, not error. Check response.")
-                return False
+                result = self.order_handler.limit_sell(self.symbol, sell_size, ask_price)
+            
+            # Check result
+            success, order_id, error_msg = self._check_order_result(result, "Sell")
+            if success:
+                self.active_sell_order_id = order_id
+                self.active_sell_order_time = time.time()
+                self.logger.info(f"Successfully placed sell order ID {order_id} at {ask_price}")
+                return True, order_id
             else:
-                error_msg = result.get("message", "Unknown error") if result else "No result"
-                self.logger.error(f"Failed to place sell limit order: {error_msg}")
-                return False
+                self.logger.error(f"Failed to place sell order: {error_msg}")
+                return False, None
+                
         except Exception as e:
             self.logger.error(f"Error placing sell order: {str(e)}")
-            return False
-
-    def _cancel_active_orders(self):
-        """Cancel all active orders"""
+            return False, None
+            
+    def _check_orders_status(self):
+        """
+        Check if active orders are still open, filled, or disappeared
+        Updates internal order tracking
+        
+        Returns:
+            Tuple of (buy_still_active, sell_still_active)
+        """
+        buy_still_active = False
+        sell_still_active = False
+        
         try:
-            for side, order_id in self.active_orders.items():
-                if order_id:
-                    self.order_handler.cancel_order(self.symbol, order_id)
-                    self.logger.info(f"Cancelled {side} order {order_id}")
-            self.active_orders = {"buy": None, "sell": None}
+            # Get current open orders
+            open_orders = self.order_handler.get_open_orders()
+            
+            # Check buy order status
+            if self.active_buy_order_id:
+                buy_still_active = any(order.get("oid") == self.active_buy_order_id for order in open_orders)
+                
+                if not buy_still_active:
+                    self.logger.info(f"Buy order {self.active_buy_order_id} is no longer open (likely filled or cancelled)")
+                    self.active_buy_order_id = None
+                    self.active_buy_order_time = None
+            
+            # Check sell order status
+            if self.active_sell_order_id:
+                sell_still_active = any(order.get("oid") == self.active_sell_order_id for order in open_orders)
+                
+                if not sell_still_active:
+                    self.logger.info(f"Sell order {self.active_sell_order_id} is no longer open (likely filled or cancelled)")
+                    self.active_sell_order_id = None
+                    self.active_sell_order_time = None
+                    
+            return buy_still_active, sell_still_active
+            
         except Exception as e:
-            self.logger.error(f"Error cancelling orders: {str(e)}")
-
+            self.logger.error(f"Error checking order status: {str(e)}")
+            return False, False
+    
     def _run_strategy(self):
         """Main strategy execution loop"""
-        self.set_status("Starting USDHL market making strategy")
+        self.set_status("Starting market making strategy")
         
         # Set leverage if using perpetual
         if self.is_perp and self.leverage > 1:
@@ -374,6 +433,7 @@ class UsdhlMarketMaking(TradingStrategy):
         # Main strategy variables
         self.running = True
         backoff_time = 0
+        last_order_check = 0
         
         # Main strategy loop
         try:
@@ -385,28 +445,94 @@ class UsdhlMarketMaking(TradingStrategy):
                     time.sleep(0.1)
                     continue
                 
-                # Check if it's time to refresh orders
-                if (current_time - self.last_tick_time) >= self.refresh_time:
-                    # Get latest market data
+                # Check if it's time to cancel all orders based on the timer
+                if (current_time - self.last_cancel_time) > self.order_max_age:
+                    self.logger.info(f"Cancelling all orders after {self.order_max_age}s timeout")
+                    # Before calling cancel_all_orders, log open orders
+                    open_orders = self.order_handler.get_open_orders()
+                    self.logger.info(f"[Instance {self.instance_id}] Open orders before cancel: {open_orders}")
+                    self.order_handler.cancel_all_orders()
+                    self.active_buy_order_id = None
+                    self.active_sell_order_id = None
+                    self.active_buy_order_time = None
+                    self.active_sell_order_time = None
+                    self.last_cancel_time = current_time
+                    
+                    # Get fresh market data after cancellation
                     market_data = self.api_connector.get_market_data(self.symbol)
-                    if not market_data or "mid_price" not in market_data:
-                        self.logger.warning("Could not get market data, skipping iteration")
+                    if "error" in market_data:
+                        self.set_status(f"Error getting market data after cancel: {market_data['error']}")
+                        time.sleep(1)
+                    else:
+                        # Update mid price
+                        if "mid_price" in market_data:
+                            self.mid_price = market_data["mid_price"]
+                        elif "best_bid" in market_data and "best_ask" in market_data:
+                            best_bid = market_data["best_bid"]
+                            best_ask = market_data["best_ask"]
+                            self.mid_price = (best_bid + best_ask) / 2
+                        
+                        # Get latest balances
+                        asset_balance, quote_balance = self.get_balances()
+                        
+                        # Place new orders
+                        if quote_balance > 1.0:
+                            self._place_buy_order(market_data)
+                            
+                        if asset_balance > 0.00001:
+                            self._place_sell_order(market_data, asset_balance)
+                
+                # Check if it's time to refresh
+                refresh_needed = (current_time - self.last_tick_time) >= self.refresh_time
+                should_check_orders = (current_time - last_order_check) >= 1  # Check order status frequently
+                
+                # Check order status more frequently than placing new orders
+                if should_check_orders:
+                    buy_active, sell_active = self._check_orders_status()
+                    last_order_check = current_time
+                
+                # Full refresh cycle
+                if refresh_needed:
+                    # 1. Get market data
+                    market_data = self.api_connector.get_market_data(self.symbol)
+                    if "error" in market_data:
+                        self.set_status(f"Error getting market data: {market_data['error']}")
+                        time.sleep(1)
                         continue
                     
-                    # Get latest balances
+                    # 2. Update mid price tracking
+                    if "mid_price" in market_data:
+                        self.mid_price = market_data["mid_price"]
+                    elif "best_bid" in market_data and "best_ask" in market_data:
+                        best_bid = market_data["best_bid"]
+                        best_ask = market_data["best_ask"]
+                        self.mid_price = (best_bid + best_ask) / 2
+                    else:
+                        self.set_status("No price data available")
+                        time.sleep(1)
+                        continue
+                    
+                    # 3. Get latest balances
                     asset_balance, quote_balance = self.get_balances()
                     
-                    # Cancel existing orders
-                    self._cancel_active_orders()
+                    # 4. Refresh orders only if needed based on current status
+                    success = True
                     
-                    # Place new orders
-                    buy_success = self._place_buy_order(market_data)
-                    sell_success = self._place_sell_order(market_data, asset_balance)
+                    # No active buy order and we have quote balance - place buy
+                    if not self.active_buy_order_id and quote_balance > 1.0:  # Ensure we have at least $1 to trade
+                        buy_success, _ = self._place_buy_order(market_data)
+                        success = success and buy_success
+                    
+                    # No active sell order and we have asset balance - place sell
+                    if not self.active_sell_order_id and asset_balance > 0.00001:  # Small minimum threshold
+                        sell_success, _ = self._place_sell_order(market_data, asset_balance)
+                        success = success and sell_success
                     
                     # Update tracking variables
-                    if buy_success and sell_success:
-                        self.set_status(f"Placed orders around {market_data['mid_price']}")
+                    if success:
+                        self.set_status(f"Orders managed successfully at {self.mid_price}")
                         self.last_tick_time = current_time
+                        self.last_order_update = current_time
                         self.consecutive_errors = 0
                     else:
                         self.consecutive_errors += 1
@@ -426,27 +552,146 @@ class UsdhlMarketMaking(TradingStrategy):
             self.set_status(f"Error: {str(e)}")
         
         finally:
-            # Cancel any remaining orders
+            self._stop_auto_cancel_all()
             self._cancel_active_orders()
             self.running = False
             self.set_status("Market making strategy stopped")
-
+    
+    def _cancel_active_orders(self):
+        """Cancel all active orders for this strategy"""
+        try:
+            if self.active_buy_order_id:
+                self.order_handler.cancel_order(self.symbol, self.active_buy_order_id)
+                self.logger.info(f"Cancelled buy order {self.active_buy_order_id}")
+                self.active_buy_order_id = None
+                self.active_buy_order_time = None
+                
+            if self.active_sell_order_id:
+                self.order_handler.cancel_order(self.symbol, self.active_sell_order_id)
+                self.logger.info(f"Cancelled sell order {self.active_sell_order_id}")
+                self.active_sell_order_id = None
+                self.active_sell_order_time = None
+                
+        except Exception as e:
+            self.logger.error(f"Error cancelling orders: {str(e)}")
+    
+    def _get_tick_size(self, market_data=None):
+        """
+        Get minimum price increment (tick size) for the symbol
+        
+        Args:
+            market_data: Optional market data to use for inference
+            
+        Returns:
+            float: Tick size
+        """
+        try:
+            # Try to get directly from exchange metadata
+            if self.api_connector and self.api_connector.info:
+                meta = self.api_connector.info.meta()
+                
+                # Look for the symbol directly
+                for asset_info in meta.get("universe", []):
+                    if asset_info.get("name") == self.symbol:
+                        if "tickSize" in asset_info:
+                            return float(asset_info["tickSize"])
+                
+                # For spot assets in format XXX/YYY, try the base asset
+                base_symbol = self.symbol.split('/')[0] if '/' in self.symbol else self.symbol
+                for asset_info in meta.get("universe", []):
+                    if asset_info.get("name") == base_symbol:
+                        if "tickSize" in asset_info:
+                            return float(asset_info["tickSize"])
+            
+            # If we can't get from metadata, use the known tick size for USDHL
+            if self.symbol == "USDHL/USDC":
+                return 0.0000000000000001  # 16 decimal places for USDHL
+            
+            # Default tick sizes based on price range
+            if self.mid_price >= 1.000000:  # USDHL-like
+                return 0.0000000000000001  # 16 decimal places
+            elif self.mid_price >= 1000:
+                return 0.1
+            elif self.mid_price >= 100:
+                return 0.01
+            elif self.mid_price >= 10:
+                return 0.001
+            elif self.mid_price >= 1:
+                return 0.0001
+            else:
+                return 0.0000000000000001  # 16 decimal places
+                
+        except Exception as e:
+            self.logger.warning(f"Error determining tick size: {str(e)}")
+            return 0.0000000000000001  # Very conservative default with 16 decimal places
+    
+    def _format_price(self, price, tick_size):
+        """
+        Format price to comply with exchange tick size
+        
+        Args:
+            price: Original price
+            tick_size: Minimum price increment
+            
+        Returns:
+            float: Properly formatted price
+        """
+        try:
+            if tick_size <= 0:
+                return round(price, 4)  # Default to 4 decimal places
+            
+            # For USDHL specifically, use a simpler approach
+            if self.symbol == "USDHL/USDC":
+                # Round to 4 decimal places first to avoid floating point issues
+                price = round(price, 4)
+                # Then ensure it's divisible by 0.0001
+                return round(price / 0.0001) * 0.0001
+            
+            # For other assets, use the original logic
+            # Round to nearest tick size
+            rounded_price = round(price / tick_size) * tick_size
+            
+            # Determine appropriate decimal places
+            if tick_size >= 1.0:
+                decimal_places = 0
+            else:
+                decimal_places = -int(math.floor(math.log10(tick_size)))
+            
+            # Format with appropriate precision
+            return round(rounded_price, decimal_places)
+            
+        except Exception as e:
+            self.logger.warning(f"Error formatting price: {str(e)}")
+            return round(price, 4)  # Fallback to 4 decimal places
+    
     def get_performance_metrics(self):
-        """Get performance metrics for the strategy"""
+        """
+        Get performance metrics for the strategy
+        
+        Returns:
+            dict: Performance metrics
+        """
         try:
             asset_balance, quote_balance = self.get_balances()
-            market_data = self.api_connector.get_market_data(self.symbol)
-            
+
+            # NEW: Calculate order ages
+            current_time = time.time()
+            buy_order_age = (current_time - self.active_buy_order_time) if self.active_buy_order_time else 0
+            sell_order_age = (current_time - self.active_sell_order_time) if self.active_sell_order_time else 0
+
             metrics = {
                 "symbol": self.symbol,
+                "mid_price": self.mid_price,
+                "has_buy_order": self.active_buy_order_id is not None,
+                "has_sell_order": self.active_sell_order_id is not None,
+                "buy_order_age": f"{buy_order_age:.1f}s" if buy_order_age > 0 else "N/A",  # NEW: Add this line
+                "sell_order_age": f"{sell_order_age:.1f}s" if sell_order_age > 0 else "N/A",  # NEW: Add this line
+                "order_max_age": f"{self.order_max_age}s",  # NEW: Add this line
                 "asset_balance": asset_balance,
                 "quote_balance": quote_balance,
-                "mid_price": market_data.get("mid_price", 0),
-                "bid_spread": self.bid_spread,
-                "ask_spread": self.ask_spread,
                 "order_size": self.order_amount,
                 "errors": self.error_count,
-                "last_trade": datetime.fromtimestamp(self.last_successful_trade).strftime("%Y-%m-%d %H:%M:%S") if self.last_successful_trade else "Never"
+                "last_update": datetime.fromtimestamp(self.last_tick_time).strftime("%Y-%m-%d %H:%M:%S") if self.last_tick_time else "Never"
             }
             
             return metrics
@@ -458,19 +703,31 @@ class UsdhlMarketMaking(TradingStrategy):
                 "error": str(e)
             }
 
+    def _trigger_auto_cancel_all(self):
+        if not self.auto_cancel_active:
+            self.logger.warning("Triggering auto-cancel-all routine due to insufficient spot balance error.")
+            self.order_handler.cancel_all_orders()
+            self.auto_cancel_active = True
+            self.auto_cancel_thread = threading.Thread(target=self._auto_cancel_all_loop, daemon=True)
+            self.auto_cancel_thread.start()
+
+    def _auto_cancel_all_loop(self):
+        while self.auto_cancel_active and self.running:
+            self.logger.info(f"[AutoCancel] Cancelling all orders every {self.auto_cancel_interval}s due to insufficient spot balance error.")
+            self.order_handler.cancel_all_orders()
+            for _ in range(self.auto_cancel_interval * 10):
+                if not self.auto_cancel_active or not self.running:
+                    break
+                time.sleep(0.1)
+
+    def _stop_auto_cancel_all(self):
+        if self.auto_cancel_active:
+            self.logger.info("Stopping auto-cancel-all routine (order placed or strategy stopped).")
+            self.auto_cancel_active = False
+
     def __del__(self):
-        """Cleanup method"""
-        self.running = False
+        """Cleanup method to stop threads and cancel orders"""
+        self._stop_auto_cancel_all()
         self._cancel_active_orders()
+        self.running = False
         self.set_status("Instance cleaned up")
-
-    def _get_size_decimals(self):
-        self._refresh_meta_cache()
-        if self._cached_size_decimals is not None:
-            return self._cached_size_decimals
-        return 8
-
-    def _format_size(self, size):
-        """Format the order size to the allowed number of decimals."""
-        decimals = self._get_size_decimals()
-        return round(size, decimals) 
